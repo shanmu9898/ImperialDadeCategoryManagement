@@ -16,11 +16,9 @@ import ast
 # CONSTANTS AND CONFIGURATION
 # =============================================================================
 
-# Column name mappings (only used columns)
-DEFAULT_COLUMNS = {
-    'item_id': 'Entity--Item',
-    'matches': 'Matches'
-}
+# Import column configurations from config
+from config import PipelineConfig
+TRANSACTION_COLUMNS = PipelineConfig.TRANSACTION_COLUMNS
 
 # =============================================================================
 # VALIDATION UTILITIES
@@ -209,35 +207,55 @@ def get_reviewed_coverage(
     im_final_with_feedback: pd.DataFrame
 ) -> pd.DataFrame:
     """
-    Get a summary of the reviewed coverage.
+    Get a summary of the reviewed coverage using current column structure.
+    
+    Args:
+        im_final: DataFrame with original data including 'Net Cost', 'Qty', 'VB Flag'
+        im_final_with_feedback: DataFrame with feedback data including 'Targets' column
+        
+    Returns:
+        DataFrame with coverage metrics for Private Label items
     """
-        # make a dataframe with columns L3M_Sales, L3M_Cogs, L3M_GM
+    # Create coverage dataframe using current columns: Net Cost, Qty, Gross Cost
     coverage = pd.DataFrame({
-        'L3M_Sales': [im_final[im_final['private_label_flag'] == True]['L3M_Sales'].sum()],
-        'L3M_Cogs': [im_final[im_final['private_label_flag'] == True]['L3M_Cogs'].sum()],
-        'L3M_adj_vol': [im_final[im_final['private_label_flag'] == True]['L3M_adj_vol'].sum()],
-        'L3M_GM':  [im_final[im_final['private_label_flag'] == True]['L3M_Sales'].sum() - im_final[im_final['private_label_flag'] == True]['L3M_Cogs'].sum()]
+        'Net Cost': [im_final[im_final[TRANSACTION_COLUMNS['vb_flag']] == 'Y - VB'][TRANSACTION_COLUMNS['net_cost']].sum()],
+        'Qty': [im_final[im_final[TRANSACTION_COLUMNS['vb_flag']] == 'Y - VB'][TRANSACTION_COLUMNS['qty']].sum()],
+        'Gross Cost': [im_final[im_final[TRANSACTION_COLUMNS['vb_flag']] == 'Y - VB'][TRANSACTION_COLUMNS['gross_cost']].sum()],
+        'GM': [im_final[im_final[TRANSACTION_COLUMNS['vb_flag']] == 'Y - VB'][TRANSACTION_COLUMNS['gross_cost']].sum() - im_final[im_final[TRANSACTION_COLUMNS['vb_flag']] == 'Y - VB'][TRANSACTION_COLUMNS['net_cost']].sum()]
     })
-    # name the row Private Label
+    # Name the row Private Label
     coverage.index = ['Private Label']
 
-    # coverage.loc['Reviewed PL SKUs'] = target in im_final_with_feedback, get the sum of L3M_Sales, L3M_Cogs, L3M_adj_vol, L3M_GM from im_final
-    coverage.loc['Reviewed PL SKUs'] = [im_final[im_final['Entity--Item'].isin(im_final_with_feedback['Targets'].unique())]['L3M_Sales'].sum(),
-                                        im_final[im_final['Entity--Item'].isin(im_final_with_feedback['Targets'].unique())]['L3M_Cogs'].sum(),
-                                        im_final[im_final['Entity--Item'].isin(im_final_with_feedback['Targets'].unique())]['L3M_adj_vol'].sum(),
-                                        im_final[im_final['Entity--Item'].isin(im_final_with_feedback['Targets'].unique())]['L3M_Sales'].sum() - im_final[im_final['Entity--Item'].isin(im_final_with_feedback['Targets'].unique())]['L3M_Cogs'].sum()]
+    # Get reviewed PL SKUs metrics
+    reviewed_pl_items = im_final[im_final['Entity--Item'].isin(im_final_with_feedback['Targets'].unique())]
+    coverage.loc['Reviewed PL SKUs'] = [
+        reviewed_pl_items[TRANSACTION_COLUMNS['net_cost']].sum(),
+        reviewed_pl_items[TRANSACTION_COLUMNS['qty']].sum(),
+        reviewed_pl_items[TRANSACTION_COLUMNS['gross_cost']].sum(),
+        reviewed_pl_items[TRANSACTION_COLUMNS['gross_cost']].sum() - reviewed_pl_items[TRANSACTION_COLUMNS['net_cost']].sum()
+    ]
+    
     coverage = coverage.T
-    # round the numbers to 2 decimal places
-    # add a third column called % Reviewed PL SKUs
-    coverage['% Reviewed PL SKUs'] = coverage['Reviewed PL SKUs'] / coverage['Private Label']
+    
+    # Calculate percentages
+    coverage['% Reviewed PL SKUs'] = coverage['Reviewed PL SKUs'] / coverage['Private Label'].replace(0, 1)
     coverage['% Reviewed PL SKUs'] = coverage['% Reviewed PL SKUs'].apply(lambda x: f"{x:.2%}")
-    # add a Total column that is not filtered by private_label_flag
-    coverage['Total'] = [im_final['L3M_Sales'].sum(), im_final['L3M_Cogs'].sum(), im_final['L3M_adj_vol'].sum(), im_final['L3M_Sales'].sum() - im_final['L3M_Cogs'].sum()]
-    coverage['% Reviewed of Total'] = coverage['Reviewed PL SKUs'] / coverage['Total']
-    coverage = coverage.round(2)
+    
+    # Add Total column (all items, not just PL)
+    coverage['Total'] = [
+        im_final[TRANSACTION_COLUMNS['net_cost']].sum(),
+        im_final[TRANSACTION_COLUMNS['qty']].sum(),
+        im_final[TRANSACTION_COLUMNS['gross_cost']].sum(),
+        im_final[TRANSACTION_COLUMNS['gross_cost']].sum() - im_final[TRANSACTION_COLUMNS['net_cost']].sum()
+    ]
+    
+    coverage['% Reviewed of Total'] = coverage['Reviewed PL SKUs'] / coverage['Total'].replace(0, 1)
     coverage['% Reviewed of Total'] = coverage['% Reviewed of Total'].apply(lambda x: f"{x:.2%}")
-    # change the column order to ['Reviewed PL SKUs', 'Private Label', 'Total', '% Reviewed PL SKUs', '% Reviewed of Total']
+    
+    # Round numeric columns and reorder
+    coverage = coverage.round(2)
     coverage = coverage[['Reviewed PL SKUs', 'Private Label', 'Total', '% Reviewed PL SKUs', '% Reviewed of Total']]
+    
     return coverage
 
 # =============================================================================
@@ -662,8 +680,8 @@ def update_matches_based_on_feedback_sym(
     feedback_target_col: str = 'Targets',
     feedback_sub_col: str = 'Subs',
     feedback_correct_col: str = 'Accept/Reject',
-    main_id_col: str = DEFAULT_COLUMNS['item_id'],
-    main_matches_col: str = DEFAULT_COLUMNS['matches'],
+    main_id_col: str = 'Entity--Item',
+    main_matches_col: str = 'Matches',
     accept_value: str = 'Yes',
     consider_value: str = 'Consider',
     reject_value: str = 'No'

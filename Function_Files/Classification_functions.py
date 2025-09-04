@@ -7,14 +7,9 @@ from pyvent.tools.llm.openai_api import OpenAIAgent
 # CONSTANTS AND CONFIGURATION
 # =============================================================================
 
-# Column name mappings
-DEFAULT_COLUMNS = {
-    'item_id': 'Entity--Item',
-    'vendor': 'vgn_name',
-    'description': 'All Descriptions',
-    'attributes': 'openai_response',
-    'sales': 'L3M_Sales'
-}
+# Import column configurations from config
+from config import PipelineConfig
+TRANSACTION_COLUMNS = PipelineConfig.TRANSACTION_COLUMNS
 
 # Processing configuration
 PROCESSING_CONFIG = {
@@ -145,7 +140,7 @@ def create_description_string(row: pd.Series, columns: List[str]) -> str:
             description_parts.append(f"{col_name}: {value}, ")
 
     description_str = " ".join(description_parts).strip()
-    all_descriptions = str(row.get(DEFAULT_COLUMNS['description'], ''))
+    all_descriptions = str(row.get('All Descriptions', ''))
 
     return f"{description_str} {all_descriptions}".strip()
 
@@ -232,10 +227,11 @@ def _create_ai_prompts(output_str: str) -> Tuple[str, str]:
     return system_prompt, user_prompt
 
 
-def explain_top_sales_description(
+def explain_top_qty_description(
     df: pd.DataFrame, 
     output_str: str, 
-    description_col: str = 'description'
+    description_col: str = 'description',
+    qty_col: str = None
 ) -> Tuple[str, str]:
     """
     Use AI to explain the description of the top-selling item.
@@ -251,7 +247,10 @@ def explain_top_sales_description(
     try:
         validate_dataframe(df, "DataFrame")
         
-        sales_col = DEFAULT_COLUMNS['sales']
+        if not qty_col:
+            sales_col = PipelineConfig.TRANSACTION_COLUMNS['qty']
+        else:
+            sales_col = sales_col
         required_cols = [sales_col, description_col]
         validate_columns_exist(df, required_cols, "DataFrame")
     except ValidationError as e:
@@ -401,17 +400,115 @@ def write_excel_file(
     except Exception as e:
         print(f"Error writing DataFrame to Excel file '{filepath}': {e}")
 
+def extract_case_pack_with_examples(df, agent, default_pack_size=1000):
+        example_text = """
+        Description: Dome Sip Lid F/10-20Oz Hot Cup Wht 20/50
+        Case Pack: 1000
+
+        Description: *Custom* Cp12 - 12Oz American Burger Cup 3 Color Print - 5000/Cs
+        Case Pack: 5000
+
+        Description: Pm-Pc3.25Blk - 3.25Oz Black Portion Cup - 20x125/Cs
+        Case Pack: 2500
+
+        Description: 64313  Clear Cup Pet Straw Slot Lid For 12-24 98Mm 1000Ca
+        Case Pack: 1000
+
+        Description: Kneaders 22Oz Ppr Cold Cup Prnt 1M
+        Case Pack: 1000
+
+        Description: Gp Cp10 Dixie 10Oz Cup 20X50Ca Pete Clear Plastic Cold Cup
+        Case Pack: 1000
+        """
+
+        system_prompt = f"""
+        You are to extract the Case Pack quantity from a product description. The Case Pack is the number of items in a case, usually a number like 1000, 500, 250, etc.
+
+        Here are some examples from the data - but these may not be the only ways case pack may be mentioned in the description:
+        {example_text}
+
+        Only return the number, no other text. If you cannot find a Case Pack in the description, return 'N/A'.
+        """
+
+
+        user_prompt = (
+                "Given this product description: '{All Descriptions}' "
+                "extract the Case Pack number frm the description. Only return the number, no other text. If you cannot find a Case Pack number in the description, return 'N/A'."
+        )
+
+            # Use the per-row system prompts
+        df = agent.format_df_prompts(df, system_prompt, user_prompt)
+        df = agent.run_df_prompts(df)
+
+        # Go through the rows where 'openai_response' is 'N/A' and set it to the value in the 'Case Pack' field (if it exists)
+        case_pack_col = PipelineConfig.TRANSACTION_COLUMNS['case_pack']
+        if case_pack_col in df.columns:
+            # If openai_response is 'N/A' and Case Pack exists, use Case Pack value, removing non-numeric characters
+            def clean_case_pack(row):
+                if str(row['openai_response']).strip() == 'N/A' and pd.notnull(row.get(case_pack_col)):
+                    # Remove all non-numeric characters from Case Pack
+                    cleaned = ''.join(filter(str.isdigit, str(row[case_pack_col])))
+                    return cleaned if cleaned else row['openai_response']
+                else:
+                    return row['openai_response']
+            df['openai_response'] = df.apply(clean_case_pack, axis=1)
+
+        df = df.drop(columns=[case_pack_col], errors='ignore')
+        df = df.rename(columns={'openai_response': case_pack_col})
+        df = df.drop(columns=['system_prompt', 'user_prompt'], errors='ignore')
+        df[case_pack_col] = df[case_pack_col].replace('N/A', pd.NA)
+        df[case_pack_col] = df[case_pack_col].fillna(default_pack_size)
+
+        return df
+
+
+def attribute_with_ai(im_final, agent, columns_for_description2, prompt_options_string,example_desc, example_output, default_pack_size=1000):
+    ps = False
+    columns_for_description = columns_for_description2.copy()
+    case_pack_col = PipelineConfig.TRANSACTION_COLUMNS['case_pack']
+    if 'Pack Size' in columns_for_description2:
+        columns_for_description.remove('Pack Size')
+        ps = True
+
+    system_prompt = f"""
+
+    You are to pull out information from a product description. 
+
+    Here are the attributes I am looking for:
+    {columns_for_description}
+
+    Here is a look at the most common values for each of these attributes. This is not an exhaustive list, but it should help you understand what I am looking for. 
+    You probably will need to pull out similar information for an attribute that's not on this list: \n\n
+    {prompt_options_string}
+
+    Return in 'Column: Value' format separated by '|'. For example, if the description is "{example_desc}", then return
+    {example_output}
+
+    Not everything will be in the description, so you can leave things blank.
+    """
+    user_prompt = "Pull out the relevant information based on this product description '{description}'"
+
+    im_final = agent.format_df_prompts(im_final, system_prompt, user_prompt)
+    im_final = agent.run_df_prompts(im_final)
+    im_final = im_final.rename(columns={'openai_response': 'attributes'})
+    
+    if ps:
+        df = extract_case_pack_with_examples(df, agent, default_pack_size)
+
+    return df
+
+
 # =============================================================================
 # MAIN ATTRIBUTE EXTRACTION FUNCTION
 # =============================================================================
 
 def extract_attributes_to_dataframe(
     df: pd.DataFrame, 
-    columns_for_description: List[str], 
-    item_id_col: str = DEFAULT_COLUMNS['item_id'],
-    description_col: str = DEFAULT_COLUMNS['description'],
-    vendor_col: str = DEFAULT_COLUMNS['vendor'],
-    attribute_col: str = DEFAULT_COLUMNS['attributes'],
+    columns_for_description2: List[str], 
+    item_id_col: str = 'Entity--Item',
+    description_col: str = "All Descriptions",
+    vendor_col: str = PipelineConfig.TRANSACTION_COLUMNS['vgn'],
+    attribute_col: str = 'attributes',
     output_excel_filepath: Optional[str] = None
 ) -> Tuple[pd.DataFrame, pd.DataFrame]: 
     """
@@ -433,18 +530,27 @@ def extract_attributes_to_dataframe(
     # Input validation
     try:
         validate_dataframe(df, "DataFrame")
-        validate_list_input(columns_for_description, "columns_for_description")
+        validate_list_input(columns_for_description2, "columns_for_description")
         
         required_cols = [item_id_col, description_col, vendor_col, attribute_col]
         validate_columns_exist(df, required_cols, "DataFrame")
     except ValidationError as e:
         print(f"Validation error: {e}")
-        empty_df = pd.DataFrame(columns=[item_id_col, description_col, vendor_col] + columns_for_description)
+        empty_df = pd.DataFrame(columns=[item_id_col, description_col, vendor_col] + columns_for_description2)
         return empty_df, pd.DataFrame()
 
     # Process data
     processed_data = []
     print(f"Processing {len(df)} rows from the input DataFrame...")
+
+    columns_for_description = columns_for_description2.copy()
+    case_pack_col = PipelineConfig.TRANSACTION_COLUMNS['case_pack']
+    if 'Pack Size' in columns_for_description:
+        columns_for_description.remove('Pack Size')
+        columns_for_description.append(case_pack_col)
+        # add | Case Pack to attributes 
+        df[attribute_col] = df[attribute_col] + ' | Case Pack: ' + df[case_pack_col].astype(str)
+
     
     for index, row in df.iterrows():
         entity_id = row[item_id_col]
@@ -501,11 +607,6 @@ def extract_attributes_to_dataframe(
         how='left'
     )
     
-    # Remove system_prompt, user_prompt and rename openai_response to attributes
-    columns_to_drop = ['system_prompt', 'user_prompt']
-    merged_df = merged_df.drop(columns=[col for col in columns_to_drop if col in merged_df.columns])
-    merged_df = merged_df.rename(columns={'openai_response': 'attributes'})
-
     return merged_df, output_df
 
 # =============================================================================
@@ -561,10 +662,10 @@ def _create_coverage_comparison(
 
 
 def coverage_improvement(
-    sfy: pd.DataFrame, 
+    sfy2: pd.DataFrame, 
     im_final: pd.DataFrame, 
     extract_attributes_df: pd.DataFrame, 
-    columns_for_description: List[str]
+    columns_for_description2: List[str]
 ) -> pd.DataFrame:
     """
     Compare data coverage before and after LLM enrichment.
@@ -582,16 +683,26 @@ def coverage_improvement(
     
     # Validate inputs
     try:
-        validate_dataframe(sfy, "sfy")
+        validate_dataframe(sfy2, "sfy")
         validate_dataframe(im_final, "im_final")
         validate_dataframe(extract_attributes_df, "extract_attributes_df")
-        validate_list_input(columns_for_description, "columns_for_description")
+        validate_list_input(columns_for_description2, "columns_for_description")
     except ValidationError as e:
         print(f"Validation error: {e}")
         return pd.DataFrame()
+
+    columns_for_description = columns_for_description2.copy()
+    case_pack_col = PipelineConfig.TRANSACTION_COLUMNS['case_pack']
+    if 'Pack Size' in columns_for_description:
+        columns_for_description.remove('Pack Size')
+        columns_for_description.append(case_pack_col)
     
+    sfy = sfy2.copy()
+    # Rename 'Pack Size' column to 'Case Pack' if it exists in sfy
+    if 'Pack Size' in sfy.columns:
+        sfy = sfy.rename(columns={'Pack Size': case_pack_col})
     # Get sfy rows that exist in im_final
-    item_id_col = DEFAULT_COLUMNS['item_id']
+    item_id_col = 'Entity--Item'
     sfy_in_im_final = sfy[sfy[item_id_col].isin(im_final[item_id_col])].copy()
     sfy_in_im_final = sfy_in_im_final[columns_for_description + [item_id_col]].copy()
     

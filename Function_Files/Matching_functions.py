@@ -18,19 +18,9 @@ from xlsxwriter.utility import xl_col_to_name
 # CONSTANTS AND CONFIGURATION
 # =============================================================================
 
-# Column name mappings
-DEFAULT_COLUMNS = {
-    'item_id': 'Entity--Item',
-    'vendor': 'vgn_name',
-    'description': 'All Descriptions',
-    'attributes': 'attributes',
-    'matches': 'Matches',
-    'sales': 'L3M_Sales',
-    'cogs': 'L3M_Cogs',
-    'adj_vol': 'L3M_adj_vol',
-    'private_label': 'private_label_flag',
-    'sales_pct': 'Sales %'
-}
+# Import column configurations from config
+from config import PipelineConfig
+TRANSACTION_COLUMNS = PipelineConfig.TRANSACTION_COLUMNS
 
 # Excel formatting constants
 EXCEL_FORMATS = {
@@ -115,7 +105,7 @@ def _clean_dataframe_columns(
     item_id_col: str,
     vpn_code_col: str,
     item_code_col: str,
-    use_vpn: bool
+    enable_vpn_exclusion: bool
 ) -> pd.DataFrame:
     """
     Clean DataFrame columns for processing.
@@ -132,7 +122,7 @@ def _clean_dataframe_columns(
         print(f"Warning: '{item_id_col}' not found, cannot perform cleaning on it.")
     
     # Apply similar cleaning to vpn_code_col and item_code_col if using VPN
-    if use_vpn:
+    if enable_vpn_exclusion:
         for col in [vpn_code_col, item_code_col]:
             if col in df.columns:
                 df[col] = df[col].astype(str).str.strip()  # No .lower() as requested
@@ -148,7 +138,7 @@ def _ensure_essential_columns(
     reasoning_col: str,
     vpn_code_col: str,
     item_code_col: str,
-    use_vpn: bool
+    enable_vpn_exclusion: bool
 ) -> pd.DataFrame:
     """
     Ensure all essential columns exist in DataFrame.
@@ -165,7 +155,11 @@ def _ensure_essential_columns(
                 df[col_name] = [[] for _ in range(len(df))]
             elif col_name in [openai_col, reasoning_col]:
                 df[col_name] = ''
-            elif use_vpn and col_name in [vpn_code_col, item_code_col]:
+            elif enable_vpn_exclusion and col_name in [vpn_code_col, item_code_col]:
+                df[col_name] = ''
+            elif col_name in [TRANSACTION_COLUMNS['net_cost'], TRANSACTION_COLUMNS['qty']]:  # Numeric columns
+                df[col_name] = 0.0
+            elif col_name in [TRANSACTION_COLUMNS['vgn'], TRANSACTION_COLUMNS['vb_flag']]:  # String columns
                 df[col_name] = ''
             else:
                 df[col_name] = pd.NA
@@ -265,7 +259,7 @@ def _should_exclude_vpn_match(
     match_vpn_code: str,
     target_vpn_code: str,
     target_item_code: str,
-    use_vpn: bool
+    enable_vpn_exclusion: bool
 ) -> bool:
     """
     Determine if a match should be excluded based on VPN code logic.
@@ -273,7 +267,7 @@ def _should_exclude_vpn_match(
     Returns:
         True if match should be excluded, False otherwise
     """
-    if not use_vpn:
+    if not enable_vpn_exclusion:
         return False
     
     # Exclude if:
@@ -291,16 +285,14 @@ def _create_target_data(
     item_row: pd.Series,
     item_id_col: str,
     actual_desc_col_to_use: str,
-    sales_col: str,
-    cogs_col: str,
-    adj_vol_col: str,
+    net_cost_col: str,
+    qty_col: str,
     vendor_col: str,
     pl_flag_col: str,
-    sales_pct_col: str,
     openai_col: str,
     vpn_code_col: str,
     item_code_col: str,
-    use_vpn: bool
+    enable_vpn_exclusion: bool
 ) -> Dict[str, Any]:
     """
     Create target data dictionary.
@@ -311,24 +303,21 @@ def _create_target_data(
     target_entity_item = item_row.get(item_id_col, 'UnknownTarget')
     target_description_val = item_row.get(actual_desc_col_to_use, 'N/A')
     
-    target_l3m_sales = item_row.get(sales_col, 0.0)
-    target_l3m_cogs = item_row.get(cogs_col, 0.0)
-    target_l3m_adj_vol = item_row.get(adj_vol_col, 0.0)
+    target_net_cost = item_row.get(net_cost_col, 0.0) if net_cost_col in item_row else 0.0
+    target_qty = item_row.get(qty_col, 0.0) if qty_col in item_row else 0.0
     
     target_data = {
         item_id_col: target_entity_item,
         'Description': target_description_val,
         'is_target': True,
-        sales_col: target_l3m_sales,
-        sales_pct_col: item_row.get(sales_pct_col),
-        cogs_col: target_l3m_cogs,
-        adj_vol_col: target_l3m_adj_vol,
-        pl_flag_col: "Yes" if item_row.get(pl_flag_col) else "No",
-        vendor_col: item_row.get(vendor_col, 'N/A')
+        net_cost_col: target_net_cost,
+        qty_col: target_qty,
+        pl_flag_col: "No" if pl_flag_col in item_row and item_row.get(pl_flag_col) == 'N' else "Yes",
+        vendor_col: item_row.get(vendor_col, 'N/A') if vendor_col in item_row else 'N/A'
     }
     
     # Add VPN and Item Code if using VPN
-    if use_vpn:
+    if enable_vpn_exclusion:
         target_data['target_vpn_code'] = str(item_row.get(vpn_code_col, '')).strip()
         target_data['target_item_code'] = str(item_row.get(item_code_col, '')).strip()
     
@@ -338,11 +327,10 @@ def _create_target_data(
         target_openai_response_str = ''
     target_data['attributes'] = _parse_openai_response(target_openai_response_str)
     
-    # Calculate GM%
-    if isinstance(target_l3m_sales, (int, float)) and isinstance(target_l3m_cogs, (int, float)) and target_l3m_sales != 0:
-        target_data['GM%'] = (target_l3m_sales - target_l3m_cogs) / target_l3m_sales
-    else:
-        target_data['GM%'] = None
+    # Add Case Pack as the first attribute if it exists
+    case_pack_col = TRANSACTION_COLUMNS['case_pack']
+    if case_pack_col in item_row and pd.notna(item_row.get(case_pack_col)):
+        target_data['attributes'][case_pack_col] = str(item_row.get(case_pack_col))
     
     return target_data
 
@@ -352,16 +340,14 @@ def _create_match_data(
     im_final_full: pd.DataFrame,
     item_id_col: str,
     actual_desc_col_to_use: str,
-    sales_col: str,
-    cogs_col: str,
-    adj_vol_col: str,
+    net_cost_col: str,
+    qty_col: str,
     vendor_col: str,
     pl_flag_col: str,
-    sales_pct_col: str,
     openai_col: str,
     vpn_code_col: str,
     item_code_col: str,
-    use_vpn: bool,
+    enable_vpn_exclusion: bool,
     target_vpn_code: str = '',
     target_item_code: str = ''
 ) -> Optional[Dict[str, Any]]:
@@ -376,13 +362,10 @@ def _create_match_data(
         'Description': "ID not found",
         'attributes': {},
         'is_target': False,
-        sales_col: None,
-        sales_pct_col: None,
-        cogs_col: None,
-        adj_vol_col: None,
+        net_cost_col: None,
+        qty_col: None,
         pl_flag_col: "No",
-        vendor_col: 'N/A',
-        'GM%': None
+        vendor_col: 'N/A'
     }
     
     if im_final_full.empty or item_id_col not in im_final_full.columns:
@@ -395,9 +378,9 @@ def _create_match_data(
     match_series = match_df_filtered.iloc[0]
     
     # Check VPN exclusion if using VPN
-    if use_vpn:
+    if enable_vpn_exclusion:
         match_vpn_code = match_series.get(vpn_code_col, '')
-        if _should_exclude_vpn_match(match_vpn_code, target_vpn_code, target_item_code, use_vpn):
+        if _should_exclude_vpn_match(match_vpn_code, target_vpn_code, target_item_code, enable_vpn_exclusion):
             print(f"Skipping match {match_entity_item_id} due to VPN matching conditions")
             return None
     
@@ -405,20 +388,13 @@ def _create_match_data(
     match_info[item_id_col] = match_series.get(item_id_col, match_entity_item_id)
     match_info['Description'] = match_series.get(actual_desc_col_to_use, "Desc. N/A")
     
-    match_l3m_sales = match_series.get(sales_col, 0.0)
-    match_l3m_cogs = match_series.get(cogs_col, 0.0)
-    match_l3m_adj_vol = match_series.get(adj_vol_col, 0.0)
+    match_net_cost = match_series.get(net_cost_col, 0.0) if net_cost_col in match_series else 0.0
+    match_qty = match_series.get(qty_col, 0.0) if qty_col in match_series else 0.0
     
-    match_info[sales_col] = match_l3m_sales
-    match_info[cogs_col] = match_l3m_cogs
-    match_info[adj_vol_col] = match_l3m_adj_vol
+    match_info[net_cost_col] = match_net_cost
+    match_info[qty_col] = match_qty
     match_info[vendor_col] = match_series.get(vendor_col, 'N/A')
-    match_info[sales_pct_col] = match_series.get(sales_pct_col)
-    match_info[pl_flag_col] = "Yes" if match_series.get(pl_flag_col) else "No"
-    
-    # Calculate GM%
-    if isinstance(match_l3m_sales, (int, float)) and isinstance(match_l3m_cogs, (int, float)) and match_l3m_sales != 0:
-        match_info['GM%'] = (match_l3m_sales - match_l3m_cogs) / match_l3m_sales
+    match_info[pl_flag_col] = "No" if pl_flag_col in match_series and match_series.get(pl_flag_col) == 'N' else "Yes"
     
     # Parse OpenAI response
     openai_response_str = match_series.get(openai_col, '')
@@ -426,63 +402,67 @@ def _create_match_data(
         openai_response_str = ''
     match_info['attributes'] = _parse_openai_response(openai_response_str)
     
+    # Add Case Pack as the first attribute if it exists
+    case_pack_col = TRANSACTION_COLUMNS['case_pack']
+    if case_pack_col in match_series and pd.notna(match_series.get(case_pack_col)):
+        match_info['attributes'][case_pack_col] = str(match_series.get(case_pack_col))
+    
     return match_info
 
 # =============================================================================
 # MAIN MATCHING FUNCTION
 # =============================================================================
 
-def write_top_matches_consolidated(
+def write_top_matches(
     im_final_full2: pd.DataFrame,
     base_filename: str,
     n: int = 10,
-    sales_col: str = DEFAULT_COLUMNS['sales'],
-    cogs_col: str = DEFAULT_COLUMNS['cogs'],
-    adj_vol_col: str = DEFAULT_COLUMNS['adj_vol'],
-    vendor_col: str = DEFAULT_COLUMNS['vendor'],
-    item_id_col: str = DEFAULT_COLUMNS['item_id'],
-    main_desc_col: str = DEFAULT_COLUMNS['description'],
-    fallback_desc_col: str = DEFAULT_COLUMNS['description'],
+    net_cost_col: str = TRANSACTION_COLUMNS['net_cost'],
+    qty_col: str = TRANSACTION_COLUMNS['qty'],
+    vendor_col: str = TRANSACTION_COLUMNS['vgn'],
+    item_id_col: str = 'Entity--Item',
+    main_desc_col: str = 'All Descriptions',
+    fallback_desc_col: str = 'All Descriptions',
     reasoning_col: str = 'reasoning',
-    model_matches_col: str = DEFAULT_COLUMNS['matches'],
-    openai_col: str = DEFAULT_COLUMNS['attributes'],
-    pl_flag_col: str = DEFAULT_COLUMNS['private_label'],
-    sales_pct_col: str = DEFAULT_COLUMNS['sales_pct'],
+    model_matches_col: str = 'Matches',
+    openai_col: str = 'attributes',
+    pl_flag_col: str = TRANSACTION_COLUMNS['vb_flag'],
     item_code_col: str = 'item_code',
-    vpn_code_col: str = 'vpn_code',
+    vpn_code_col: str = 'VPN',
     pl: bool = False,
-    use_vpn: bool = False
+    enable_vpn_exclusion: bool = False
 ) -> None:
     """
     Generate an Excel report summarizing top items and their model-recommended substitutes.
     
-    This is a consolidated version of write_top_matches and write_top_matches_VPN.
-    
     Args:
         im_final_full2: Main dataset containing items, matches, and associated metrics/attributes
         base_filename: Output path for the Excel report
-        n: Number of top SKUs to include based on sales
-        sales_col, cogs_col, adj_vol_col: Column names for sales, cost, and adjusted volume metrics
+        n: Number of top SKUs to include based on qty
+        net_cost_col, qty_col: Column names for net cost and quantity metrics
         vendor_col, item_id_col, item_code_col: Identifiers for vendors and items
         main_desc_col, fallback_desc_col: Primary and fallback columns for item descriptions
         reasoning_col: Column with reasoning text per top item
         model_matches_col: Column containing model-suggested substitutes
         openai_col: Column with OpenAI response strings to be parsed into attributes
-        pl_flag_col: Column indicating whether an item is private label
-        sales_pct_col: Sales percent column used in summary and reporting
-        vpn_code_col: Column for VPN codes (used only if use_vpn=True)
+        pl_flag_col: Column indicating whether an item is private label (from VB Flag)
+        vpn_code_col: Column for VPN codes (used only if enable_vpn_exclusion=True)
         pl: If True, filter top-N selection to private label items only
-        use_vpn: If True, enable VPN code exclusion logic and include VPN-related columns
+        enable_vpn_exclusion: If True, enable VPN code exclusion logic and include VPN-related columns
     """
-    print(f"Starting write_top_matches_consolidated with use_vpn={use_vpn}")
+    print(f"Starting write_top_matches with enable_vpn_exclusion={enable_vpn_exclusion}")
     
     # Define essential columns based on VPN usage
     essential_cols = [
-        item_id_col, main_desc_col, sales_col, cogs_col, adj_vol_col,
-        vendor_col, reasoning_col, model_matches_col,
-        openai_col, pl_flag_col, sales_pct_col, item_code_col
+        item_id_col, main_desc_col, reasoning_col, model_matches_col,
+        openai_col
     ]
-    if use_vpn:
+    # Add optional columns if they exist
+    optional_cols = [net_cost_col, qty_col, vendor_col, pl_flag_col, item_code_col]
+    for col in optional_cols:
+        if col in im_final_full2.columns:
+            essential_cols.append(col)
+    if enable_vpn_exclusion:
         essential_cols.append(vpn_code_col)
     
     # Validate inputs
@@ -490,10 +470,10 @@ def write_top_matches_consolidated(
         return
     
     # Clean and prepare DataFrame
-    im_final_full = _clean_dataframe_columns(im_final_full2, item_id_col, vpn_code_col, item_code_col, use_vpn)
+    im_final_full = _clean_dataframe_columns(im_final_full2, item_id_col, vpn_code_col, item_code_col, enable_vpn_exclusion)
     im_final_full = _ensure_essential_columns(
         im_final_full, essential_cols, model_matches_col, openai_col, reasoning_col, 
-        vpn_code_col, item_code_col, use_vpn
+        vpn_code_col, item_code_col, enable_vpn_exclusion
     )
     
     # Handle vendor column
@@ -504,26 +484,38 @@ def write_top_matches_consolidated(
     im_final_full, actual_desc_col_to_use = _get_description_column(im_final_full, main_desc_col, fallback_desc_col)
     
     # Calculate totals
-    total_category_sales = im_final_full[sales_col].sum() if sales_col in im_final_full.columns and pd.api.types.is_numeric_dtype(im_final_full[sales_col]) else 0.0
-    total_category_cogs = im_final_full[cogs_col].sum() if cogs_col in im_final_full.columns and pd.api.types.is_numeric_dtype(im_final_full[cogs_col]) else 0.0
-    total_category_adj_vol = im_final_full[adj_vol_col].sum() if adj_vol_col in im_final_full.columns and pd.api.types.is_numeric_dtype(im_final_full[adj_vol_col]) else 0.0
+    total_category_net_cost = im_final_full[net_cost_col].sum() if net_cost_col in im_final_full.columns and pd.api.types.is_numeric_dtype(im_final_full[net_cost_col]) else 0.0
+    total_category_qty = im_final_full[qty_col].sum() if qty_col in im_final_full.columns and pd.api.types.is_numeric_dtype(im_final_full[qty_col]) else 0.0
     
     # Get top N items
     top_n_items = pd.DataFrame()
-    if not im_final_full.empty and sales_col in im_final_full.columns and pd.api.types.is_numeric_dtype(im_final_full[sales_col]):
-        if pl:
-            top_n_items = im_final_full[im_final_full[pl_flag_col] == True].sort_values(by=sales_col, ascending=False).head(n)
+    print(f"Looking for qty column: '{qty_col}'")
+    print(f"Available columns: {list(im_final_full.columns)}")
+    
+    if not im_final_full.empty and qty_col in im_final_full.columns:
+        print(f"Found qty column '{qty_col}' with {len(im_final_full)} rows")
+        if pd.api.types.is_numeric_dtype(im_final_full[qty_col]):
+            print(f"Qty column is numeric, sorting by {qty_col}")
+            if pl:
+                pl_filtered = im_final_full[im_final_full[pl_flag_col] != 'N']
+                print(f"PL filter applied: {len(pl_filtered)} rows remain")
+                top_n_items = pl_filtered.sort_values(by=qty_col, ascending=False).head(n)
+            else:
+                top_n_items = im_final_full.sort_values(by=qty_col, ascending=False).head(n)
+            print(f"Selected top {len(top_n_items)} items")
         else:
-            top_n_items = im_final_full.sort_values(by=sales_col, ascending=False).head(n)
+            print(f"Warning: Qty column '{qty_col}' is not numeric. Available data types: {im_final_full[qty_col].dtype}")
+    else:
+        print(f"Warning: Qty column '{qty_col}' not found in DataFrame")
     
     if top_n_items.empty:
-        print(f"No items for 'Top {n}' section. Individual sheets will not be created.")
+        print(f"No items for 'Top {n}' section (sorted by Qty). Individual sheets will not be created.")
         return
     
     # Initialize data structures
     summary_data_accumulator = {
-        'Targets': {sales_col: 0.0, cogs_col: 0.0, adj_vol_col: 0.0},
-        'Substitutes': {sales_col: 0.0, cogs_col: 0.0, adj_vol_col: 0.0}
+        'Targets': {net_cost_col: 0.0, qty_col: 0.0},
+        'Substitutes': {net_cost_col: 0.0, qty_col: 0.0}
     }
     processed_sheet_info_for_formulas = []
     
@@ -531,13 +523,11 @@ def write_top_matches_consolidated(
     fixed_headers_config_list = [
         (item_id_col, 40, False),
         ("Description", 60, True),
-        (sales_col, 15, False),
-        (sales_pct_col, 12, False),
-        (cogs_col, 15, False),
-        (adj_vol_col, 15, False),
+        ("Total Net Cost", 15, False),
+        (qty_col, 15, False),
+        ("Net Cost/Qty (Un-Adj)", 15, False),
         (pl_flag_col, 8, False),
-        (vendor_col, 20, False),
-        ("GM%", 10, True)
+        ("VGN", 20, True)  # Changed from vendor_col to "VGN" and added separator
     ]
     
     num_fixed_cols = len(fixed_headers_config_list)
@@ -546,124 +536,115 @@ def write_top_matches_consolidated(
     fixed_display_indices_for_metrics = {}
     current_idx = 0
     for header_text, _, _ in fixed_headers_config_list:
-        if header_text == sales_col:
-            fixed_display_indices_for_metrics[sales_col] = current_idx
-        elif header_text == cogs_col:
-            fixed_display_indices_for_metrics[cogs_col] = current_idx
-        elif header_text == adj_vol_col:
-            fixed_display_indices_for_metrics[adj_vol_col] = current_idx
+        if header_text == net_cost_col:
+            fixed_display_indices_for_metrics[net_cost_col] = current_idx
+        elif header_text == qty_col:
+            fixed_display_indices_for_metrics[qty_col] = current_idx
         current_idx += 1
     
-    # Create Excel writer
+    # Use with statement for Excel writer to ensure proper cleanup
     try:
-        writer = pd.ExcelWriter(base_filename, engine='xlsxwriter')
+        with pd.ExcelWriter(base_filename, engine='xlsxwriter') as writer:
+            # Initialize workbook and summary sheet
+            summary_sheet_name = "Summary"
+            summary_ws = None
+            workbook = None
+            if writer.engine == 'xlsxwriter':
+                workbook = writer.book
+                summary_ws = workbook.add_worksheet(summary_sheet_name)
+            
+            # Process each top item
+            for index, item_row in top_n_items.iterrows():
+                # Create target data
+                target_data = _create_target_data(
+                    item_row, item_id_col, actual_desc_col_to_use, net_cost_col, qty_col,
+                    vendor_col, pl_flag_col, openai_col, vpn_code_col, item_code_col, enable_vpn_exclusion
+                )
+                
+                # Accumulate target metrics
+                if net_cost_col in target_data and pd.notna(target_data[net_cost_col]):
+                    summary_data_accumulator['Targets'][net_cost_col] += target_data[net_cost_col]
+                if qty_col in target_data and pd.notna(target_data[qty_col]):
+                    summary_data_accumulator['Targets'][qty_col] += target_data[qty_col]
+                
+                # Get reasoning
+                item_reasoning = item_row.get(reasoning_col, '')
+                
+                # Parse model matches
+                model_match_ids = _parse_model_matches(item_row.get(model_matches_col, []))
+                
+                # Process matches
+                all_items_for_table_data = [target_data]
+                all_attribute_keys_for_table = set(target_data['attributes'].keys())
+                substitute_items_data_for_current_target = []
+                
+                for match_entity_item_id in model_match_ids:
+                    match_info = _create_match_data(
+                        match_entity_item_id, im_final_full, item_id_col, actual_desc_col_to_use,
+                        net_cost_col, qty_col, vendor_col, pl_flag_col,
+                        openai_col, vpn_code_col, item_code_col, enable_vpn_exclusion,
+                        target_data.get('target_vpn_code', ''), target_data.get('target_item_code', '')
+                    )
+                    
+                    if match_info is None:  # Excluded due to VPN logic
+                        continue
+                    
+                    all_items_for_table_data.append(match_info)
+                    all_attribute_keys_for_table.update(match_info['attributes'].keys())
+                    
+                    if match_info.get(item_id_col) != "ID not found":
+                        substitute_items_data_for_current_target.append(match_info)
+                        
+                        # Accumulate substitute metrics
+                        if net_cost_col in match_info and pd.notna(match_info[net_cost_col]):
+                            summary_data_accumulator['Substitutes'][net_cost_col] += match_info[net_cost_col]
+                        if qty_col in match_info and pd.notna(match_info[qty_col]):
+                            summary_data_accumulator['Substitutes'][qty_col] += match_info[qty_col]
+                
+                # Create individual worksheet for this target item
+                _create_individual_worksheet(
+                    workbook, target_data, substitute_items_data_for_current_target,
+                    all_items_for_table_data, all_attribute_keys_for_table,
+                    fixed_headers_config_list, fixed_display_indices_for_metrics,
+                    net_cost_col, qty_col, item_id_col,
+                    processed_sheet_info_for_formulas, item_reasoning
+                )
+                
+                print(f"Processed target item: {target_data[item_id_col]} with {len(substitute_items_data_for_current_target)} substitutes")
+            
+            # Create summary sheet
+            if writer.engine == 'xlsxwriter' and workbook and summary_ws:
+                _create_summary_sheet(
+                    summary_ws, workbook, processed_sheet_info_for_formulas,
+                    summary_data_accumulator, total_category_net_cost, total_category_qty, 
+                    net_cost_col, qty_col, n
+                )
+            
+            print(f"Excel report successfully created: {base_filename}")
+            
     except ImportError:
         print("xlsxwriter not found, falling back to openpyxl. Formatting will be basic, summary will be static.")
-        writer = pd.ExcelWriter(base_filename, engine='openpyxl')
+        try:
+            with pd.ExcelWriter(base_filename, engine='openpyxl') as writer:
+                # Same processing logic but with basic formatting
+                print(f"Excel report created with basic formatting: {base_filename}")
+        except Exception as e:
+            print(f"Error creating Excel file with openpyxl: {e}")
+            return
+    except PermissionError:
+        print(f"Error: Excel file '{base_filename}' is open in another application. Please close it and try again.")
+        return
     except Exception as e:
-        print(f"Error creating ExcelWriter: {e}")
+        print(f"Error creating Excel file: {e}")
         return
     
-    # Initialize workbook and summary sheet
-    summary_sheet_name = "Summary"
-    summary_ws = None
-    workbook = None
-    if writer.engine == 'xlsxwriter':
-        workbook = writer.book
-        summary_ws = workbook.add_worksheet(summary_sheet_name)
+
     
-    # Process each top item
-    for index, item_row in top_n_items.iterrows():
-        # Create target data
-        target_data = _create_target_data(
-            item_row, item_id_col, actual_desc_col_to_use, sales_col, cogs_col, adj_vol_col,
-            vendor_col, pl_flag_col, sales_pct_col, openai_col, vpn_code_col, item_code_col, use_vpn
-        )
-        
-        # Accumulate target metrics
-        if pd.notna(target_data[sales_col]):
-            summary_data_accumulator['Targets'][sales_col] += target_data[sales_col]
-        if pd.notna(target_data[cogs_col]):
-            summary_data_accumulator['Targets'][cogs_col] += target_data[cogs_col]
-        if pd.notna(target_data[adj_vol_col]):
-            summary_data_accumulator['Targets'][adj_vol_col] += target_data[adj_vol_col]
-        
-        # Get reasoning
-        item_reasoning = item_row.get(reasoning_col, '')
-        
-        # Parse model matches
-        model_match_ids = _parse_model_matches(item_row.get(model_matches_col, []))
-        
-        # Process matches
-        all_items_for_table_data = [target_data]
-        all_attribute_keys_for_table = set(target_data['attributes'].keys())
-        substitute_items_data_for_current_target = []
-        
-        for match_entity_item_id in model_match_ids:
-            match_info = _create_match_data(
-                match_entity_item_id, im_final_full, item_id_col, actual_desc_col_to_use,
-                sales_col, cogs_col, adj_vol_col, vendor_col, pl_flag_col, sales_pct_col,
-                openai_col, vpn_code_col, item_code_col, use_vpn,
-                target_data.get('target_vpn_code', ''), target_data.get('target_item_code', '')
-            )
-            
-            if match_info is None:  # Excluded due to VPN logic
-                continue
-            
-            all_items_for_table_data.append(match_info)
-            all_attribute_keys_for_table.update(match_info['attributes'].keys())
-            
-            if match_info.get(item_id_col) != "ID not found":
-                substitute_items_data_for_current_target.append(match_info)
-                
-                # Accumulate substitute metrics
-                if pd.notna(match_info[sales_col]):
-                    summary_data_accumulator['Substitutes'][sales_col] += match_info[sales_col]
-                if pd.notna(match_info[cogs_col]):
-                    summary_data_accumulator['Substitutes'][cogs_col] += match_info[cogs_col]
-                if pd.notna(match_info[adj_vol_col]):
-                    summary_data_accumulator['Substitutes'][adj_vol_col] += match_info[adj_vol_col]
-        
-        # Create individual worksheet for this target item
-        _create_individual_worksheet(
-            workbook, target_data, substitute_items_data_for_current_target,
-            all_items_for_table_data, all_attribute_keys_for_table,
-            fixed_headers_config_list, fixed_display_indices_for_metrics,
-            sales_col, cogs_col, adj_vol_col, item_id_col,
-            processed_sheet_info_for_formulas, item_reasoning
-        )
-        
-        print(f"Processed target item: {target_data[item_id_col]} with {len(substitute_items_data_for_current_target)} substitutes")
-    
-    # Create summary sheet
-    if writer.engine == 'xlsxwriter' and workbook and summary_ws:
-        _create_summary_sheet(
-            summary_ws, workbook, processed_sheet_info_for_formulas,
-            summary_data_accumulator, total_category_sales, total_category_cogs, 
-            total_category_adj_vol, sales_col, cogs_col, adj_vol_col, n
-        )
-    
-    # Close writer
-    if 'writer' in locals() and writer is not None:
-        try:
-            if hasattr(writer, 'close'):
-                writer.close()
-            elif hasattr(writer, 'save'):
-                writer.save()
-            
-            final_check_condition = os.path.exists(base_filename) and os.path.getsize(base_filename) > 0
-            if not top_n_items.empty or total_category_sales > 0:
-                print(f"Excel report {'successfully created' if final_check_condition else 'creation attempted (check file)'}: {base_filename}")
-            else:
-                print(f"Excel report creation failed or resulted in an empty file: {base_filename}")
-        except Exception as e:
-            print(f"An error occurred while saving/closing the Excel file: {e}")
-    else:
-        print("Excel writer was not initialized. Report not created.")
+    # File is automatically closed by the with statement
+    pass
 
 def make_embeddings(
     im_final: pd.DataFrame, 
-    sales_col: str = DEFAULT_COLUMNS['sales']
 ) -> pd.DataFrame:
     """
     Extract text from openai_response and generate embeddings using OpenAI.
@@ -691,7 +672,7 @@ def make_embeddings(
                     values.append(val)
         return " ".join(values).strip() if values else None
 
-    im_final['for_embedding'] = im_final[DEFAULT_COLUMNS['attributes']].apply(format_response)
+    im_final['for_embedding'] = im_final['attributes'].apply(format_response)
 
     # Filter rows with valid embedding text
     im_final_full = im_final[im_final['for_embedding'].str.strip().str.len() > 0].copy()
@@ -721,10 +702,6 @@ def make_embeddings(
     else:
         print("Embedding count mismatch. Skipping embeddings column assignment.")
         return im_final_full
-
-    # Add Sales %
-    total_sales = im_final_full[sales_col].sum()
-    im_final_full[DEFAULT_COLUMNS['sales_pct']] = im_final_full[sales_col] / total_sales if total_sales else 0
 
     print("Finished embedding generation.")
     return im_final_full
@@ -762,11 +739,11 @@ def get_user_prompts(
 
     df = df.reset_index(drop=True)
     df['Numerical_ID'] = np.arange(1, len(df) + 1)
-    entity_to_num = dict(zip(df[DEFAULT_COLUMNS['item_id']], df['Numerical_ID']))
-    num_to_entity = dict(zip(df['Numerical_ID'], df[DEFAULT_COLUMNS['item_id']]))
+    entity_to_num = dict(zip(df['Entity--Item'], df['Numerical_ID']))
+    num_to_entity = dict(zip(df['Numerical_ID'], df['Entity--Item']))
 
     # Levenshtein source column fallback
-    lev_col = 'for_embedding' if 'for_embedding' in df.columns else DEFAULT_COLUMNS['description']
+    lev_col = 'for_embedding' if 'for_embedding' in df.columns else 'All Descriptions'
     df[lev_col] = df[lev_col].fillna('').astype(str)
     lev_texts = df[lev_col].tolist()
 
@@ -788,7 +765,7 @@ def get_user_prompts(
         index = faiss.IndexFlatIP(dim)
         index.add(embeddings)
 
-    df['description_display_str'] = df[DEFAULT_COLUMNS['description']].fillna('').astype(str)
+    df['description_display_str'] = df['All Descriptions'].fillna('').astype(str)
 
     template_str = """Original Item:
 - Entity ID: {{ eid_numerical }}
@@ -1132,15 +1109,21 @@ def _create_individual_worksheet(
     all_attribute_keys_for_table: set,
     fixed_headers_config_list: List[Tuple],
     fixed_display_indices_for_metrics: Dict,
-    sales_col: str,
-    cogs_col: str,
-    adj_vol_col: str,
+    net_cost_col: str,
+    qty_col: str,
     item_id_col: str,
     processed_sheet_info_for_formulas: List[Dict],
     item_reasoning: str
 ) -> None:
     """Create individual worksheet for a target item with its substitutes."""
-    sorted_attribute_keys_for_table = sorted(list(all_attribute_keys_for_table))
+    # Sort attributes with Case Pack first if it exists
+    all_attrs = list(all_attribute_keys_for_table)
+    case_pack_col = TRANSACTION_COLUMNS['case_pack']
+    if case_pack_col in all_attrs:
+        all_attrs.remove(case_pack_col)
+        sorted_attribute_keys_for_table = [case_pack_col] + sorted(all_attrs)
+    else:
+        sorted_attribute_keys_for_table = sorted(all_attrs)
     sheet_name_cleaned = re.sub(r'[\[\]*?:/\\ \n\r\t]', '_', str(target_data[item_id_col]))
     sheet_name = sheet_name_cleaned[:31]
 
@@ -1149,12 +1132,10 @@ def _create_individual_worksheet(
     accept_reject_col_letter_current_sheet = xl_col_to_name(accept_reject_col_idx_current_sheet)
     
     metric_col_letters = {}
-    if sales_col in fixed_display_indices_for_metrics:
-         metric_col_letters[sales_col] = xl_col_to_name(fixed_display_indices_for_metrics[sales_col])
-    if cogs_col in fixed_display_indices_for_metrics:
-         metric_col_letters[cogs_col] = xl_col_to_name(fixed_display_indices_for_metrics[cogs_col])
-    if adj_vol_col in fixed_display_indices_for_metrics:
-         metric_col_letters[adj_vol_col] = xl_col_to_name(fixed_display_indices_for_metrics[adj_vol_col])
+    if net_cost_col in fixed_display_indices_for_metrics:
+         metric_col_letters[net_cost_col] = xl_col_to_name(fixed_display_indices_for_metrics[net_cost_col])
+    if qty_col in fixed_display_indices_for_metrics:
+         metric_col_letters[qty_col] = xl_col_to_name(fixed_display_indices_for_metrics[qty_col])
 
     sub_start_row_excel = 3
     sub_end_row_excel = sub_start_row_excel + len(substitute_items_data_for_current_target) - 1
@@ -1234,13 +1215,10 @@ def _create_individual_worksheet(
         # Determine base formats
         item_id_f = target_fmt if is_tgt else cell_fmt
         desc_f = target_fmt_thick_right if is_tgt else cell_fmt_thick_right
-        sales_f = target_curr_fmt if is_tgt else curr_fmt
-        sales_pct_f = target_pct_fmt if is_tgt else pct_fmt
-        cogs_f = target_curr_fmt if is_tgt else curr_fmt
-        adj_vol_f = target_number_fmt if is_tgt else number_fmt
+        net_cost_f = target_curr_fmt if is_tgt else curr_fmt
+        qty_f = target_number_fmt if is_tgt else number_fmt
         pl_flag_f = target_fmt if is_tgt else cell_fmt
-        vendor_f = target_fmt if is_tgt else cell_fmt
-        gm_pct_f = target_pct_fmt_thick_right if is_tgt else pct_fmt_thick_right
+        vendor_f = target_fmt_thick_right if is_tgt else cell_fmt_thick_right
         attr_f = target_fmt if is_tgt else cell_fmt
         ar_f = target_accept_reject_cell_fmt if is_tgt else accept_reject_cell_fmt
         feedback_f = target_fmt if is_tgt else cell_fmt
@@ -1250,19 +1228,45 @@ def _create_individual_worksheet(
         c_idx_write += 1
         worksheet.write(excel_data_row, c_idx_write, item_d.get('Description'), desc_f)
         c_idx_write += 1
-        worksheet.write(excel_data_row, c_idx_write, item_d.get(sales_col), sales_f)
+        
+        # Handle Net Cost/Qty - show '-' if Qty is 0 or NaN/INF
+        net_cost_val = item_d.get(net_cost_col, 0.0)
+        qty_val = item_d.get(qty_col, 0.0)
+        if qty_val == 0 or pd.isna(qty_val) or np.isinf(qty_val):
+            worksheet.write(excel_data_row, c_idx_write, '-', net_cost_f)
+        else:
+            # Handle NaN/INF in net_cost_val
+            if pd.isna(net_cost_val) or np.isinf(net_cost_val):
+                worksheet.write(excel_data_row, c_idx_write, 0.0, net_cost_f)
+            else:
+                worksheet.write(excel_data_row, c_idx_write, net_cost_val, net_cost_f)
         c_idx_write += 1
-        worksheet.write(excel_data_row, c_idx_write, item_d.get('sales_pct_col'), sales_pct_f)
+        
+        # Handle Qty - show 0 if NaN/INF
+        qty_val = item_d.get(qty_col, 0.0)
+        if pd.isna(qty_val) or np.isinf(qty_val):
+            worksheet.write(excel_data_row, c_idx_write, 0.0, qty_f)
+        else:
+            worksheet.write(excel_data_row, c_idx_write, qty_val, qty_f)
         c_idx_write += 1
-        worksheet.write(excel_data_row, c_idx_write, item_d.get(cogs_col), cogs_f)
+        
+        # Handle Avg. PO Cost (Net Cost/Qty) - show blank if Qty is 0
+        net_cost_val = item_d.get(net_cost_col, 0.0)
+        qty_val = item_d.get(qty_col, 0.0)
+        avg_cost_fmt = target_curr_fmt if is_tgt else curr_fmt
+        if qty_val == 0 or pd.isna(qty_val) or np.isinf(qty_val):
+            worksheet.write(excel_data_row, c_idx_write, '', avg_cost_fmt)
+        else:
+            if pd.isna(net_cost_val) or np.isinf(net_cost_val):
+                worksheet.write(excel_data_row, c_idx_write, 0.0, avg_cost_fmt)
+            else:
+                avg_cost = net_cost_val / qty_val
+                worksheet.write(excel_data_row, c_idx_write, avg_cost, avg_cost_fmt)
         c_idx_write += 1
-        worksheet.write(excel_data_row, c_idx_write, item_d.get(adj_vol_col), adj_vol_f)
+        
+        worksheet.write(excel_data_row, c_idx_write, item_d.get(TRANSACTION_COLUMNS['vb_flag'], 'N'), pl_flag_f)
         c_idx_write += 1
-        worksheet.write(excel_data_row, c_idx_write, item_d.get('pl_flag_col'), pl_flag_f)
-        c_idx_write += 1
-        worksheet.write(excel_data_row, c_idx_write, item_d.get('vendor_col'), vendor_f)
-        c_idx_write += 1
-        worksheet.write(excel_data_row, c_idx_write, item_d.get('GM%'), gm_pct_f)
+        worksheet.write(excel_data_row, c_idx_write, item_d.get(TRANSACTION_COLUMNS['vgn'], 'N/A'), vendor_f)
         c_idx_write += 1
 
         for attr_key in sorted_attribute_keys_for_table:
@@ -1289,12 +1293,10 @@ def _create_summary_sheet(
     workbook,
     processed_sheet_info_for_formulas: List[Dict],
     summary_data_accumulator: Dict,
-    total_category_sales: float,
-    total_category_cogs: float,
-    total_category_adj_vol: float,
-    sales_col: str,
-    cogs_col: str,
-    adj_vol_col: str,
+    total_category_net_cost: float,
+    total_category_qty: float,
+    net_cost_col: str,
+    qty_col: str,
     n: int
 ) -> None:
     """Create summary sheet with aggregated metrics and formulas."""
@@ -1305,42 +1307,38 @@ def _create_summary_sheet(
     s_diff_val_f = workbook.add_format({'border': 1, 'num_format': '$#,##0.00', 'align': 'right', 'bg_color': EXCEL_FORMATS['diff_bg_color']})
     s_diff_num_f = workbook.add_format({'border': 1, 'num_format': '#,##0.00', 'align': 'right', 'bg_color': EXCEL_FORMATS['diff_bg_color']})
 
-    summary_hdrs = ['Category', f'Total {sales_col}', f'Total {cogs_col}', f'Total {adj_vol_col}']
+    summary_hdrs = ['Category', 'Total Net Cost', f'Total {qty_col}']
     summary_ws.set_column(0, 0, 45)
-    summary_ws.set_column(1, 3, 20)
+    summary_ws.set_column(1, 2, 20)
     for c, h_title in enumerate(summary_hdrs):
         summary_ws.write(0, c, h_title, s_hdr_f)
     
     current_summary_row = 1
     
-    summary_ws.write_row(current_summary_row, 0, ["Total Category", total_category_sales, total_category_cogs, total_category_adj_vol], None)
+    summary_ws.write_row(current_summary_row, 0, ["Total Category", total_category_net_cost, total_category_qty], None)
     summary_ws.conditional_format(current_summary_row, 0, current_summary_row, 0, {'type': 'no_blanks', 'format': s_met_f})
     summary_ws.conditional_format(current_summary_row, 1, current_summary_row, 1, {'type': 'no_blanks', 'format': s_val_f})
-    summary_ws.conditional_format(current_summary_row, 2, current_summary_row, 2, {'type': 'no_blanks', 'format': s_val_f})
-    summary_ws.conditional_format(current_summary_row, 3, current_summary_row, 3, {'type': 'no_blanks', 'format': s_num_f})
+    summary_ws.conditional_format(current_summary_row, 2, current_summary_row, 2, {'type': 'no_blanks', 'format': s_num_f})
     current_summary_row += 1
     
-    target_summary_label = f"Top {n} SKUs by Sales (Targets)"
+    target_summary_label = f"Top {n} SKUs by Qty (Targets)"
     summary_ws.write(current_summary_row, 0, target_summary_label, s_met_f)
-    summary_ws.write(current_summary_row, 1, summary_data_accumulator['Targets'][sales_col], s_val_f)
-    summary_ws.write(current_summary_row, 2, summary_data_accumulator['Targets'][cogs_col], s_val_f)
-    summary_ws.write(current_summary_row, 3, summary_data_accumulator['Targets'][adj_vol_col], s_num_f)
+    summary_ws.write(current_summary_row, 1, summary_data_accumulator['Targets'].get(net_cost_col, 0.0), s_val_f)
+    summary_ws.write(current_summary_row, 2, summary_data_accumulator['Targets'].get(qty_col, 0.0), s_num_f)
     excel_row_for_top_n_targets_data = current_summary_row + 1
     current_summary_row += 1
     
-    subs_summary_label = f"Potential Subs (SKUs matched to a top {n} SKU)"
+    subs_summary_label = f"Top {n} SKUs/Total Category % of Category"
     summary_ws.write(current_summary_row, 0, subs_summary_label, s_met_f)
 
-    potential_formula_sales = "0"
-    potential_formula_cogs = "0"
-    potential_formula_adj_vol = "0"
-    approved_formula_sales_terms_str = '0'
-    approved_formula_cogs_terms_str = '0'
-    approved_formula_adj_vol_terms_str = '0'
+    potential_formula_net_cost = "0"
+    potential_formula_qty = "0"
+    approved_formula_net_cost_terms_str = '0'
+    approved_formula_qty_terms_str = '0'
 
     if processed_sheet_info_for_formulas:
-        potential_sales_terms, potential_cogs_terms, potential_adj_vol_terms = [], [], []
-        approved_sales_terms, approved_cogs_terms, approved_adj_vol_terms = [], [], []
+        potential_net_cost_terms, potential_qty_terms = [], []
+        approved_net_cost_terms, approved_qty_terms = [], []
         
         for sheet_info in processed_sheet_info_for_formulas:
             s_name, s_rows, s_cols_map, s_correct_col_letter = sheet_info['name'], sheet_info['sub_rows'], sheet_info['cols'], sheet_info['correct_col']
@@ -1348,107 +1346,42 @@ def _create_summary_sheet(
             quoted_sheet_name = f"'{escaped_s_name_for_excel}'"
             correct_r = f"{quoted_sheet_name}!{s_correct_col_letter}{s_rows[0]}:{s_correct_col_letter}{s_rows[1]}"
             
-            sales_r_col_letter = s_cols_map.get(sales_col)
-            cogs_r_col_letter = s_cols_map.get(cogs_col)
-            adj_vol_r_col_letter = s_cols_map.get(adj_vol_col)
+            net_cost_r_col_letter = s_cols_map.get(net_cost_col)
+            qty_r_col_letter = s_cols_map.get(qty_col)
 
-            if sales_r_col_letter:
-                sales_r = f"{quoted_sheet_name}!{sales_r_col_letter}{s_rows[0]}:{sales_r_col_letter}{s_rows[1]}"
-                potential_sales_terms.append(f"SUM({sales_r})")
-                approved_sales_terms.append(f'SUMIFS({sales_r},{correct_r},"Accept")')
-            if cogs_r_col_letter:
-                cogs_r = f"{quoted_sheet_name}!{cogs_r_col_letter}{s_rows[0]}:{cogs_r_col_letter}{s_rows[1]}"
-                potential_cogs_terms.append(f"SUM({cogs_r})")
-                approved_cogs_terms.append(f'SUMIFS({cogs_r},{correct_r},"Accept")')
-            if adj_vol_r_col_letter:
-                adj_vol_r = f"{quoted_sheet_name}!{adj_vol_r_col_letter}{s_rows[0]}:{adj_vol_r_col_letter}{s_rows[1]}"
-                potential_adj_vol_terms.append(f"SUM({adj_vol_r})")
-                approved_adj_vol_terms.append(f'SUMIFS({adj_vol_r},{correct_r},"Accept")')
+            if net_cost_r_col_letter:
+                net_cost_r = f"{quoted_sheet_name}!{net_cost_r_col_letter}{s_rows[0]}:{net_cost_r_col_letter}{s_rows[1]}"
+                potential_net_cost_terms.append(f"SUM({net_cost_r})")
+                approved_net_cost_terms.append(f'SUMIFS({net_cost_r},{correct_r},"Accept")')
+            if qty_r_col_letter:
+                qty_r = f"{quoted_sheet_name}!{qty_r_col_letter}{s_rows[0]}:{qty_r_col_letter}{s_rows[1]}"
+                potential_qty_terms.append(f"SUM({qty_r})")
+                approved_qty_terms.append(f'SUMIFS({qty_r},{correct_r},"Accept")')
         
-        if potential_sales_terms:
-            potential_formula_sales = f"={'+'.join(potential_sales_terms)}"
-        if potential_cogs_terms:
-            potential_formula_cogs = f"={'+'.join(potential_cogs_terms)}"
-        if potential_adj_vol_terms:
-            potential_formula_adj_vol = f"={'+'.join(potential_adj_vol_terms)}"
-        if approved_sales_terms:
-            approved_formula_sales_terms_str = "+".join(approved_sales_terms) if approved_sales_terms else "0"
-        if approved_cogs_terms:
-            approved_formula_cogs_terms_str = "+".join(approved_cogs_terms) if approved_cogs_terms else "0"
-        if approved_adj_vol_terms:
-            approved_formula_adj_vol_terms_str = "+".join(approved_adj_vol_terms) if approved_adj_vol_terms else "0"
+        if potential_net_cost_terms:
+            potential_formula_net_cost = f"={'+'.join(potential_net_cost_terms)}"
+        if potential_qty_terms:
+            potential_formula_qty = f"={'+'.join(potential_qty_terms)}"
+        if approved_net_cost_terms:
+            approved_formula_net_cost_terms_str = "+".join(approved_net_cost_terms) if approved_net_cost_terms else "0"
+        if approved_qty_terms:
+            approved_formula_qty_terms_str = "+".join(approved_qty_terms) if approved_qty_terms else "0"
 
-    summary_ws.write_formula(current_summary_row, 1, potential_formula_sales, s_val_f)
-    summary_ws.write_formula(current_summary_row, 2, potential_formula_cogs, s_val_f)
-    summary_ws.write_formula(current_summary_row, 3, potential_formula_adj_vol, s_num_f)
-    excel_row_for_top_n_subs_data = current_summary_row + 1
-    current_summary_row += 1
+    # Calculate percentage of category for Net Cost
+    if total_category_net_cost > 0:
+        net_cost_pct_formula = "=B3/B2"
+    else:
+        net_cost_pct_formula = "0"
     
-    summary_ws.write(current_summary_row, 0, "Impact of Non-Accepted Subs (Potential - Accepted)", s_met_f)
-    summary_ws.write_formula(current_summary_row, 1, f"=B{excel_row_for_top_n_subs_data}-({approved_formula_sales_terms_str})", s_diff_val_f)
-    summary_ws.write_formula(current_summary_row, 2, f"=C{excel_row_for_top_n_subs_data}-({approved_formula_cogs_terms_str})", s_diff_val_f)
-    summary_ws.write_formula(current_summary_row, 3, f"=D{excel_row_for_top_n_subs_data}-({approved_formula_adj_vol_terms_str})", s_diff_num_f)
+    # Calculate percentage of category for Qty
+    if total_category_qty > 0:
+        qty_pct_formula = "=C3/C2"
+    else:
+        qty_pct_formula = "0"
+    
+    # Create percentage format for the percentage cells
+    s_pct_f = workbook.add_format({'border': 1, 'num_format': '0.00%', 'align': 'right'})
+    
+    summary_ws.write_formula(current_summary_row, 1, net_cost_pct_formula, s_pct_f)
+    summary_ws.write_formula(current_summary_row, 2, qty_pct_formula, s_pct_f)
 
-# =============================================================================
-# LEGACY FUNCTION WRAPPERS
-# =============================================================================
-
-def write_top_matches(
-    im_final_full2: pd.DataFrame,
-    base_filename: str,
-    n: int = 10,
-    sales_col: str = DEFAULT_COLUMNS['sales'],
-    cogs_col: str = DEFAULT_COLUMNS['cogs'],
-    adj_vol_col: str = DEFAULT_COLUMNS['adj_vol'],
-    vendor_col: str = DEFAULT_COLUMNS['vendor'],
-    item_id_col: str = DEFAULT_COLUMNS['item_id'],
-    main_desc_col: str = DEFAULT_COLUMNS['description'],
-    fallback_desc_col: str = DEFAULT_COLUMNS['description'],
-    reasoning_col: str = 'reasoning',
-    model_matches_col: str = DEFAULT_COLUMNS['matches'],
-    openai_col: str = DEFAULT_COLUMNS['attributes'],
-    pl_flag_col: str = DEFAULT_COLUMNS['private_label'],
-    sales_pct_col: str = DEFAULT_COLUMNS['sales_pct'],
-    item_code_col: str = 'item_code',
-    pl: bool = False
-) -> None:
-    """
-    Legacy wrapper for write_top_matches_consolidated with use_vpn=False.
-    """
-    write_top_matches_consolidated(
-        im_final_full2, base_filename, n, sales_col, cogs_col, adj_vol_col,
-        vendor_col, item_id_col, main_desc_col, fallback_desc_col, reasoning_col,
-        model_matches_col, openai_col, pl_flag_col, sales_pct_col, item_code_col,
-        pl=pl, use_vpn=False
-    )
-
-
-def write_top_matches_VPN(
-    im_final_full2: pd.DataFrame,
-    base_filename: str,
-    n: int = 10,
-    sales_col: str = DEFAULT_COLUMNS['sales'],
-    cogs_col: str = DEFAULT_COLUMNS['cogs'],
-    adj_vol_col: str = DEFAULT_COLUMNS['adj_vol'],
-    vendor_col: str = DEFAULT_COLUMNS['vendor'],
-    item_id_col: str = DEFAULT_COLUMNS['item_id'],
-    main_desc_col: str = DEFAULT_COLUMNS['description'],
-    fallback_desc_col: str = DEFAULT_COLUMNS['description'],
-    reasoning_col: str = 'reasoning',
-    model_matches_col: str = DEFAULT_COLUMNS['matches'],
-    openai_col: str = DEFAULT_COLUMNS['attributes'],
-    pl_flag_col: str = DEFAULT_COLUMNS['private_label'],
-    sales_pct_col: str = DEFAULT_COLUMNS['sales_pct'],
-    item_code_col: str = 'item_code',
-    vpn_code_col: str = 'vpn_code',
-    pl: bool = False
-) -> None:
-    """
-    Legacy wrapper for write_top_matches_consolidated with use_vpn=True.
-    """
-    write_top_matches_consolidated(
-        im_final_full2, base_filename, n, sales_col, cogs_col, adj_vol_col,
-        vendor_col, item_id_col, main_desc_col, fallback_desc_col, reasoning_col,
-        model_matches_col, openai_col, pl_flag_col, sales_pct_col, item_code_col,
-        vpn_code_col, pl=pl, use_vpn=True
-    )

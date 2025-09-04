@@ -6,34 +6,12 @@ from pyvent.tools.llm.openai_api import OpenAIAgent
 # CONSTANTS AND CONFIGURATION
 # =============================================================================
 
-# Column name mappings (only used columns)
-DEFAULT_COLUMNS = {
-    'item_id': 'Entity--Item'
-}
-
-# Processing configuration
-PROCESSING_CONFIG = {
-    'sample_size': 100,
-    'ai_model': 'gpt-4o-mini',
-    'ai_chunk_size': 32
-}
-
-# Category level mapping
-CATEGORY_LEVEL_MAP = {
-    2: 'item_category_level2_name',
-    3: 'item_category_level3_name'
-}
+# Import column configurations from config
+from config import PipelineConfig
+TRANSACTION_COLUMNS = PipelineConfig.TRANSACTION_COLUMNS
 
 # Required columns for data processing
 REQUIRED_COLUMNS = ['UNSPSC', 'UL ECOLOGO Certification']
-
-# Columns for concatenation in search
-SEARCH_COLUMNS = [
-    'item_category_level1_code', 'item_category_level1_name',
-    'item_category_level2_code', 'item_category_level2_name', 
-    'item_category_level3_code', 'item_category_level3_name',      
-    'description_line1_txt', 'description_line2_txt', 'description_line3_txt'
-]
 
 # =============================================================================
 # VALIDATION UTILITIES
@@ -70,52 +48,119 @@ def validate_columns_exist(df: pd.DataFrame, required_columns: List[str], df_nam
     if missing_cols:
         raise ValidationError(f"Missing required columns in {df_name}: {', '.join(missing_cols)}")
 
+
+def map_erp_system_to_number(series):
+    """
+    Maps each unique ERP System to a unique integer, with 'S2K' always mapped to 1.
+    All other ERP Systems are mapped to unique integers starting from 2.
+    Returns a dictionary mapping and a Series of mapped values.
+    """
+    unique_systems = pd.Series(series.unique())
+    # Ensure 'S2K' is always present and first
+    unique_systems = unique_systems[unique_systems.str.upper() != 'S2K']
+    mapping = {'S2K': 1}
+    for idx, val in enumerate(unique_systems, start=2):
+        mapping[val] = idx
+    mapped_series = series.apply(lambda x: mapping.get(str(x).upper(), None) if str(x).upper() == 'S2K' else mapping.get(x, None))
+    return mapping, mapped_series
+
+# =============================================================================
+# GROUPING FUNCTIONS
+# =============================================================================
+
+def group_data(
+    im_grp: pd.DataFrame,
+    qty_col: str = PipelineConfig.TRANSACTION_COLUMNS['qty'],
+    gross_cost_col: str = PipelineConfig.TRANSACTION_COLUMNS['gross_cost'],
+    net_cost_col: str = PipelineConfig.TRANSACTION_COLUMNS['net_cost'],
+    entity_item_col: str = 'Entity--Item',
+    item_desc1_col: str = PipelineConfig.TRANSACTION_COLUMNS['item_desc_1'],
+    item_desc2_col: str = PipelineConfig.TRANSACTION_COLUMNS['item_desc_2'],
+    po_cost_amt_col: str = 'po_cost_amt',  # Optionally allow custom name
+) -> pd.DataFrame:
+    """
+    Group and aggregate item data, preserving key attributes for each Entity--Item.
+
+    - Aggregates qty_col, gross_cost_col, net_cost_col by [entity_item_col, item_desc1_col, item_desc2_col].
+    - If po_cost_amt_col is present, computes its weighted average (weighted by qty_col) per group.
+    - Preserves the first occurrence of 'Case Pack', 'VB Flag', 'VGN', 'VPN' (if present).
+    - Handles missing columns gracefully.
+    - All column names can be customized via parameters.
+    """
+    case_pack_col = PipelineConfig.TRANSACTION_COLUMNS['case_pack']
+    vb_flag_col = PipelineConfig.TRANSACTION_COLUMNS['vb_flag']
+    vgn_col = PipelineConfig.TRANSACTION_COLUMNS['vgn']
+    vpn_col = PipelineConfig.TRANSACTION_COLUMNS['vpn']
+
+    agg_cols = [col for col in [qty_col, gross_cost_col, net_cost_col] if col in im_grp.columns]
+    group_cols = [entity_item_col, item_desc1_col, item_desc2_col]
+
+    # Collect extra columns to preserve
+    extra_cols = [col for col in [case_pack_col, vb_flag_col, vgn_col, vpn_col] if col]
+
+    # Prepare DataFrame with first occurrence of extra columns per Entity--Item
+    if extra_cols:
+        first_extra = (
+            im_grp.drop_duplicates(subset=[entity_item_col], keep='first')
+            [[entity_item_col] + extra_cols]
+        )
+    else:
+        first_extra = None
+
+    # Fill group-by columns with empty string to avoid NaN issues
+    im_grp[group_cols] = im_grp[group_cols].fillna('')
+
+    # Check if po_cost_amt_col is present
+    has_po_cost_amt = po_cost_amt_col in im_grp.columns
+
+    if agg_cols or has_po_cost_amt:
+        # Prepare aggregation dictionary
+        agg_dict = {col: 'sum' for col in agg_cols}
+        
+        # Aggregate numeric columns first
+        im_grp_agg = im_grp.groupby(group_cols, as_index=False)[agg_cols].sum()
+        
+        # Handle po_cost_amt weighted average separately if present
+        if has_po_cost_amt:
+            # Calculate weighted average manually after grouping
+            po_cost_weighted = im_grp.groupby(group_cols).apply(
+                lambda x: (x[po_cost_amt_col] * x[qty_col]).sum() / x[qty_col].sum() 
+                if x[qty_col].sum() > 0 else float('nan')
+            ).reset_index()
+            
+            # Rename the calculated column to match the original name
+            po_cost_weighted = po_cost_weighted.rename(columns={0: po_cost_amt_col})
+            
+            # Merge the weighted average back to the aggregated data
+            im_grp_agg = im_grp_agg.merge(po_cost_weighted, on=group_cols, how='left')
+        # Ensure all group-by columns are present (in case of missing values)
+        group_meta = im_grp[group_cols].drop_duplicates()
+        im_grp_out = pd.merge(im_grp_agg, group_meta, on=group_cols, how='right')
+    else:
+        # No aggregation, just unique rows by group_cols
+        im_grp_out = im_grp.drop_duplicates(subset=[entity_item_col], keep='first')[group_cols]
+
+    # Merge in extra columns, if any
+    if extra_cols and first_extra is not None:
+        im_grp_out = im_grp_out.merge(first_extra, on=entity_item_col, how='left')
+        # Standardize column names for output
+        rename_map = {}
+        if case_pack_col:
+            rename_map[case_pack_col] = PipelineConfig.TRANSACTION_COLUMNS['case_pack']
+        if vb_flag_col:
+            rename_map[vb_flag_col] = PipelineConfig.TRANSACTION_COLUMNS['vb_flag']
+        if vgn_col:
+            rename_map[vgn_col] = PipelineConfig.TRANSACTION_COLUMNS['vgn']
+        if vpn_col:
+            rename_map[vpn_col] = PipelineConfig.TRANSACTION_COLUMNS['vpn']
+        if rename_map:
+            im_grp_out = im_grp_out.rename(columns=rename_map)
+
+    return im_grp_out
+
 # =============================================================================
 # DATA FILTERING FUNCTIONS
 # =============================================================================
-
-def _validate_s2k_inputs(
-    s2k_div: str,
-    im_grp: pd.DataFrame,
-    sfy: pd.DataFrame,
-    level: int
-) -> Tuple[bool, str, Optional[str]]:
-    """
-    Validate input parameters for S2K processing.
-    
-    Returns:
-        Tuple of (is_valid, error_message, category_column_name)
-    """
-    try:
-        validate_string_input(s2k_div, "s2k_div")
-        validate_dataframe(im_grp, "im_grp")
-        validate_dataframe(sfy, "sfy")
-    except ValidationError as e:
-        return False, str(e), None
-    
-    category_col_name = CATEGORY_LEVEL_MAP.get(level)
-    if not category_col_name:
-        return False, f"Invalid level {level}. Must be 2 or 3.", None
-    
-    try:
-        validate_columns_exist(im_grp, [category_col_name, 'Entity'], "im_grp")
-        validate_columns_exist(sfy, [DEFAULT_COLUMNS['item_id']], "sfy")
-    except ValidationError as e:
-        return False, str(e), None
-    
-    return True, "", category_col_name
-
-
-def _filter_data_by_category(
-    im_grp: pd.DataFrame,
-    s2k_div: str,
-    category_col_name: str
-) -> pd.DataFrame:
-    """Filter im_grp DataFrame by category and entity."""
-    return im_grp[
-        (im_grp[category_col_name] == s2k_div) & 
-        (im_grp['Entity'] == 1)
-    ].copy()
 
 
 def _filter_sfy_by_items(
@@ -123,7 +168,7 @@ def _filter_sfy_by_items(
     im_s2k: pd.DataFrame
 ) -> pd.DataFrame:
     """Filter sfy DataFrame based on items from im_s2k."""
-    item_id_col = DEFAULT_COLUMNS['item_id']
+    item_id_col = 'Entity--Item'
     items_to_keep = im_s2k[item_id_col].dropna().unique()
     
     if items_to_keep.size == 0:
@@ -177,7 +222,8 @@ def _get_columns_with_coverage(
 
 def _extract_sample_data(
     filtered_sfy: pd.DataFrame,
-    columns_with_coverage: List[str]
+    columns_with_coverage: List[str],
+    sample_size: int = 100
 ) -> Tuple[Dict[str, List], List[str]]:
     """
     Extract sample data from columns with coverage.
@@ -193,27 +239,212 @@ def _extract_sample_data(
         if not values:
             continue
         
-        if len(values) >= PROCESSING_CONFIG['sample_size']:
-            sample = values[:PROCESSING_CONFIG['sample_size']]
+        if len(values) >= sample_size:
+            sample = values[:sample_size]
         else:
-            multiplier = (PROCESSING_CONFIG['sample_size'] // len(values)) + 1
-            sample = (values * multiplier)[:PROCESSING_CONFIG['sample_size']]
+            multiplier = (sample_size // len(values)) + 1
+            sample = (values * multiplier)[:sample_size]
         
         final_data_dict[col] = sample
         columns_actually_populated.append(col)
     
     return final_data_dict, columns_actually_populated
 
+def add_po_cost(transactions: pd.DataFrame, item_master: pd.DataFrame) -> pd.DataFrame:
+    """
+    Add PO cost amount from item master to transactions by matching on Entity--Item and location.
+    
+    Args:
+        transactions: DataFrame with transaction data containing 'Entity--Item' and 'Whs Code' columns
+        item_master: DataFrame with item master data containing 'Entity--Item', 'location_code', and 'po_cost_amt' columns
+        
+    Returns:
+        DataFrame with transactions plus the 'po_cost_amt' column from item master
+        
+    Raises:
+        ValidationError: If input validation fails or required columns are missing
+    """
+    # Validate inputs
+    validate_dataframe(transactions, "transactions")
+    validate_dataframe(item_master, "item_master")
+    
+    # Check required columns in transactions
+    required_transaction_cols = ['Entity--Item', PipelineConfig.TRANSACTION_COLUMNS['whs_code']]
+    validate_columns_exist(transactions, required_transaction_cols, "transactions")
+    
+    # Check required columns in item_master
+    required_item_master_cols = ['Entity--Item', 'location_code', 'po_cost_amt']
+    validate_columns_exist(item_master, required_item_master_cols, "item_master")
+    
+    # Create a copy to avoid modifying the original
+    transactions_with_po = transactions.copy()
+    
+    # Create a mapping key for item_master (Entity--Item + location_code)
+    item_master['match_key'] = item_master['Entity--Item'].astype(str) + '|' + item_master['location_code'].astype(str)
+    
+    # Create a mapping dictionary for faster lookup
+    po_cost_mapping = item_master.set_index('match_key')['po_cost_amt'].to_dict()
+    
+    # Create match keys for transactions
+    transactions_with_po['match_key'] = transactions_with_po['Entity--Item'].astype(str) + '|' + transactions_with_po['Whs Code'].astype(str)
+    
+    # Map PO cost amounts
+    transactions_with_po['po_cost_amt'] = transactions_with_po['match_key'].map(po_cost_mapping)
+    
+    # Clean up temporary columns
+    transactions_with_po = transactions_with_po.drop('match_key', axis=1)
+    
+    # Handle Qty calculation when Qty = 0, Net Cost > 0, and PO cost is available
+    # Calculate Qty = Net Cost / PO Cost for these cases
+    qty_update_mask = (
+        (transactions_with_po[PipelineConfig.TRANSACTION_COLUMNS['qty']] <= 0) & 
+        (transactions_with_po[PipelineConfig.TRANSACTION_COLUMNS['net_cost']] > 0) & 
+        (transactions_with_po['po_cost_amt'].notna()) &
+        (transactions_with_po['po_cost_amt'] > 0)  # Avoid division by zero
+    )
+    
+    if qty_update_mask.any():
+        # Calculate new quantities and ensure proper data type
+        new_qty_values = (
+            transactions_with_po.loc[qty_update_mask, PipelineConfig.TRANSACTION_COLUMNS['net_cost']] / 
+            transactions_with_po.loc[qty_update_mask, 'po_cost_amt']
+        )
+        
+        # Convert to the same dtype as the original Qty column
+        original_qty_dtype = transactions_with_po[PipelineConfig.TRANSACTION_COLUMNS['qty']].dtype
+        new_qty_values = new_qty_values.astype(original_qty_dtype)
+        
+        transactions_with_po.loc[qty_update_mask, PipelineConfig.TRANSACTION_COLUMNS['qty']] = new_qty_values
+        
+        qty_updates = qty_update_mask.sum()
+        print(f"  Updated {qty_updates} transactions with Qty = Net Cost / PO Cost")
+    
+    # Handle Gross Cost calculation when Qty > 0, Gross Cost <= 0, and PO cost is available
+    # Calculate Gross Cost = PO Cost × Qty for these cases
+    gross_cost_update_mask = (
+        (transactions_with_po[PipelineConfig.TRANSACTION_COLUMNS['qty']] > 0) & 
+        (transactions_with_po[PipelineConfig.TRANSACTION_COLUMNS['gross_cost']] <= 0) & 
+        (transactions_with_po['po_cost_amt'].notna()) &
+        (transactions_with_po['po_cost_amt'] > 0)  # Ensure PO cost is positive
+    )
+    
+    if gross_cost_update_mask.any():
+        # Calculate new gross costs and ensure proper data type
+        new_gross_cost_values = (
+            transactions_with_po.loc[gross_cost_update_mask, 'po_cost_amt'] * 
+            transactions_with_po.loc[gross_cost_update_mask, PipelineConfig.TRANSACTION_COLUMNS['qty']]
+        )
+        
+        # Convert to the same dtype as the original Gross Cost column
+        original_gross_cost_dtype = transactions_with_po[PipelineConfig.TRANSACTION_COLUMNS['gross_cost']].dtype
+        new_gross_cost_values = new_gross_cost_values.astype(original_gross_cost_dtype)
+        
+        transactions_with_po.loc[gross_cost_update_mask, PipelineConfig.TRANSACTION_COLUMNS['gross_cost']] = new_gross_cost_values
+        
+        gross_cost_updates = gross_cost_update_mask.sum()
+        print(f"  Updated {gross_cost_updates} transactions with Gross Cost = PO Cost × Qty")
+    
+    # Handle Net Cost calculation when POD = "N" (no discount) for transactions with updated gross costs
+    # Set Net Cost = Gross Cost for these cases
+    net_cost_update_mask = (
+        gross_cost_update_mask & 
+        (transactions_with_po[PipelineConfig.TRANSACTION_COLUMNS['pod']] == 'N')  # POD indicates no discount
+    )
+    
+    if net_cost_update_mask.any():
+        # Set net cost equal to gross cost for no-discount transactions and ensure proper data type
+        new_net_cost_values = transactions_with_po.loc[net_cost_update_mask, PipelineConfig.TRANSACTION_COLUMNS['gross_cost']].copy()
+        
+        # Convert to the same dtype as the original Net Cost column
+        original_net_cost_dtype = transactions_with_po[PipelineConfig.TRANSACTION_COLUMNS['net_cost']].dtype
+        new_net_cost_values = new_net_cost_values.astype(original_net_cost_dtype)
+        
+        transactions_with_po.loc[net_cost_update_mask, PipelineConfig.TRANSACTION_COLUMNS['net_cost']] = new_net_cost_values
+        
+        net_cost_updates = net_cost_update_mask.sum()
+        print(f"  Updated {net_cost_updates} transactions with Net Cost = Gross Cost (POD = 'N')")
+    
+    # Handle PO Cost calculation when po_cost_amt is NaN but Qty and Gross Cost are available
+    # Calculate po_cost_amt = Gross Cost / Qty for these cases
+    po_cost_update_mask = (
+        (transactions_with_po['po_cost_amt'].isna()) & 
+        (transactions_with_po[PipelineConfig.TRANSACTION_COLUMNS['qty']] > 0) & 
+        (transactions_with_po[PipelineConfig.TRANSACTION_COLUMNS['gross_cost']] > 0)
+    )
+    
+    if po_cost_update_mask.any():
+        # Calculate new PO costs and ensure proper data type
+        new_po_cost_values = (
+            transactions_with_po.loc[po_cost_update_mask, PipelineConfig.TRANSACTION_COLUMNS['gross_cost']] / 
+            transactions_with_po.loc[po_cost_update_mask, PipelineConfig.TRANSACTION_COLUMNS['qty']]
+        )
+        
+        # Convert to the same dtype as the original po_cost_amt column (if it exists)
+        if 'po_cost_amt' in transactions_with_po.columns:
+            # If po_cost_amt column exists, try to match its dtype
+            try:
+                original_po_cost_dtype = transactions_with_po['po_cost_amt'].dtype
+                new_po_cost_values = new_po_cost_values.astype(original_po_cost_dtype)
+            except:
+                # If conversion fails, keep as float
+                pass
+        
+        transactions_with_po.loc[po_cost_update_mask, 'po_cost_amt'] = new_po_cost_values
+        
+        po_cost_updates = po_cost_update_mask.sum()
+        print(f"  Updated {po_cost_updates} transactions with po_cost_amt = Gross Cost / Qty")
+    else:
+        po_cost_updates = 0
+    
+    # Calculate total fixes across all four types
+    total_fixes = qty_updates + gross_cost_updates + net_cost_updates + po_cost_updates
+    
+    # Report matching statistics
+    total_transactions = len(transactions_with_po)
+    matched_transactions = transactions_with_po['po_cost_amt'].notna().sum()
+    match_rate = (matched_transactions / total_transactions) * 100 if total_transactions > 0 else 0
+    
+    print(f"PO Cost matching complete:")
+    print(f"  Total transactions: {total_transactions}")
+    print(f"  Matched transactions: {matched_transactions}")
+    print(f"  Match rate: {match_rate:.1f}%")
+    print(f"  Total data fixes applied: {total_fixes} (Qty: {qty_updates}, Gross Cost: {gross_cost_updates}, Net Cost: {net_cost_updates}, PO Cost: {po_cost_updates})")
+    
+    # Remove rows with negative values in key columns
+    initial_row_count = len(transactions_with_po)
+    
+    # Create mask for rows to remove (negative Qty, Gross Cost, or Net Cost)
+    rows_to_remove = (
+        (transactions_with_po[PipelineConfig.TRANSACTION_COLUMNS['qty']] <= 0) | 
+        (transactions_with_po[PipelineConfig.TRANSACTION_COLUMNS['gross_cost']] <= 0) | 
+        (transactions_with_po[PipelineConfig.TRANSACTION_COLUMNS['net_cost']] <= 0)
+    )
+    
+    if rows_to_remove.any():
+        # Count rows being removed
+        removed_row_count = rows_to_remove.sum()
+        
+        # Remove the negative rows
+        transactions_with_po = transactions_with_po[~rows_to_remove].copy()
+        
+        # Report removal statistics
+        final_row_count = len(transactions_with_po)
+        print(f"  Data cleanup complete:")
+        print(f"    Removed {removed_row_count} rows with negative values")
+        print(f"    Final row count: {final_row_count} (from {initial_row_count})")
+    else:
+        print(f"  Data cleanup complete: No rows with negative values found")
+    
+    return transactions_with_po
+
 # =============================================================================
 # MAIN S2K PROCESSING FUNCTION
 # =============================================================================
 
 def get_columns_with_coverage(
-    s2k_div: str,
-    im_grp: pd.DataFrame,
+    im_s2k: pd.DataFrame,
     sfy: pd.DataFrame,
     coverage_threshold: float,
-    level: int = 2
 ) -> Tuple[pd.DataFrame, List[str], pd.DataFrame]:
     """
     Filter DataFrame based on category and select columns meeting coverage threshold.
@@ -228,19 +459,6 @@ def get_columns_with_coverage(
     Returns:
         Tuple of (filtered_im_grp, columns_with_coverage, extracted_values_df)
     """
-    print(f"Processing category '{s2k_div}' at level {level}")
-    
-    # Validate inputs
-    is_valid, error_msg, category_col_name = _validate_s2k_inputs(s2k_div, im_grp, sfy, level)
-    if not is_valid:
-        print(f"Warning: {error_msg}")
-        return pd.DataFrame(), [], pd.DataFrame()
-    
-    # Filter im_grp by category
-    im_s2k = _filter_data_by_category(im_grp, s2k_div, category_col_name)
-    if im_s2k.empty:
-        print(f"Warning: No items found for '{s2k_div}' at level {level}")
-        return pd.DataFrame(), [], pd.DataFrame()
     
     # Filter sfy by items
     filtered_sfy_rows = _filter_sfy_by_items(sfy, im_s2k)
@@ -263,170 +481,3 @@ def get_columns_with_coverage(
     print(f"Extracted sample data for {len(final_data_dict)} columns")
     
     return im_s2k, columns_actually_populated, result_df
-
-# =============================================================================
-# NON-S2K PROCESSING FUNCTIONS
-# =============================================================================
-
-def _validate_non_s2k_inputs(
-    im_grp: pd.DataFrame,
-    search_str: List[str],
-    category_name: str
-) -> Tuple[bool, str]:
-    """
-    Validate inputs for get_non_s2k function.
-    
-    Returns:
-        Tuple of (is_valid, error_message)
-    """
-    try:
-        validate_dataframe(im_grp, "im_grp")
-        validate_list_input(search_str, "search_str")
-        validate_string_input(category_name, "category_name")
-        
-        required_columns = ['Entity'] + SEARCH_COLUMNS
-        validate_columns_exist(im_grp, required_columns, "im_grp")
-    except ValidationError as e:
-        return False, str(e)
-    
-    return True, ""
-
-
-def _create_concatenated_search_text(im_grp: pd.DataFrame) -> pd.DataFrame:
-    """Create concatenated search text from multiple columns."""
-    im_grp_copy = im_grp.copy()
-    im_grp_copy['concatenated_str'] = im_grp_copy[SEARCH_COLUMNS].astype(str).agg(' '.join, axis=1)
-    return im_grp_copy
-
-
-def _filter_non_primary_items(
-    im_grp: pd.DataFrame,
-    search_str: List[str]
-) -> pd.DataFrame:
-    """Filter non-primary items that match search pattern."""
-    pattern = '|'.join(search_str)
-    return im_grp[
-        (im_grp['Entity'] != 1) &
-        (im_grp['concatenated_str'].str.lower().str.contains(pattern, regex=True))
-    ].copy()
-
-# =============================================================================
-# AI PROCESSING FUNCTIONS
-# =============================================================================
-
-def _create_ai_prompts(category_name: str, extra: Optional[str] = None) -> Tuple[str, str]:
-    """
-    Create system and user prompts for AI processing.
-    
-    Returns:
-        Tuple of (system_prompt, user_prompt)
-    """
-    system_prompt = f"""
-You are to tag if a product is {category_name} related based on the product description.
-Just return 1 if you think it is {category_name} related and 0 if you think it is not. 
-No reasoning, no explanation, no other text. If you are unsure, return 0.
-{extra or ""}
-    """.strip()
-
-    user_prompt = (
-        f"Is this product a(n) {category_name}: {{concatenated_str}}\n\n"
-        f"Please only return 1 if yes, or 0 if no."
-    )
-    
-    return system_prompt, user_prompt
-
-
-def _process_with_ai(
-    im_nons2k: pd.DataFrame,
-    system_prompt: str,
-    user_prompt: str
-) -> pd.DataFrame:
-    """Process DataFrame with AI agent for tagging."""
-    try:
-        agent = OpenAIAgent(
-            model=PROCESSING_CONFIG['ai_model'], 
-            chunk_size=PROCESSING_CONFIG['ai_chunk_size']
-        )
-        im_nons2k_tagged = agent.format_df_prompts(im_nons2k, system_prompt, user_prompt)
-        return agent.run_df_prompts(im_nons2k_tagged)
-    except Exception as e:
-        print(f"Error during AI processing: {e}")
-        return pd.DataFrame()
-
-
-def _filter_ai_approved_items(im_nons2k_tagged: pd.DataFrame) -> pd.DataFrame:
-    """
-    Filter items approved by AI and clean up metadata columns.
-    
-    Returns:
-        Cleaned DataFrame with only AI-approved items
-    """
-    if im_nons2k_tagged.empty:
-        return pd.DataFrame()
-    
-    # Filter AI-approved items
-    filtered_items = im_nons2k_tagged[
-        im_nons2k_tagged['openai_response'] == "1"
-    ].copy()
-    
-    # Remove AI agent metadata columns (last 3 columns)
-    if len(filtered_items.columns) >= 3:
-        filtered_items = filtered_items.iloc[:, :-3]
-    
-    return filtered_items
-
-# =============================================================================
-# MAIN NON-S2K PROCESSING FUNCTION
-# =============================================================================
-
-def get_non_s2k(
-    im_grp: pd.DataFrame,
-    search_str: List[str],
-    category_name: str,
-    extra: Optional[str] = None
-) -> pd.DataFrame:
-    """
-    Filter non-primary items and use AI to tag category-related ones.
-    
-    Args:
-        im_grp: DataFrame with item information and Entity column
-        search_str: List of search terms to match against
-        category_name: Category to tag items against
-        extra: Additional instructions for AI agent
-    
-    Returns:
-        DataFrame of AI-approved category-related non-primary items
-    """
-    print(f"Processing non-primary items for category: {category_name}")
-    
-    # Validate inputs
-    is_valid, error_msg = _validate_non_s2k_inputs(im_grp, search_str, category_name)
-    if not is_valid:
-        print(f"Warning: {error_msg}")
-        return pd.DataFrame()
-    
-    # Create concatenated search text
-    im_grp_with_search = _create_concatenated_search_text(im_grp)
-    
-    # Filter non-primary items matching search pattern
-    im_nons2k = _filter_non_primary_items(im_grp_with_search, search_str)
-    print(f"Found {len(im_nons2k)} non-primary items matching search pattern")
-    
-    if im_nons2k.empty:
-        print("No matching non-primary items found")
-        return pd.DataFrame()
-    
-    # Create AI prompts
-    system_prompt, user_prompt = _create_ai_prompts(category_name, extra)
-    
-    # Process with AI agent
-    im_nons2k_tagged = _process_with_ai(im_nons2k, system_prompt, user_prompt)
-    if im_nons2k_tagged.empty:
-        print("AI processing failed or returned no results")
-        return pd.DataFrame()
-    
-    # Filter AI-approved items
-    filtered_items = _filter_ai_approved_items(im_nons2k_tagged)
-    print(f"AI approved {len(filtered_items)} items as {category_name} related")
-    
-    return filtered_items
