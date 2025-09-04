@@ -1,0 +1,10 @@
+# Ignore all files in Data/ folder
+Data/
+
+# Ignore system/editor files
+.DS_Store
+Thumbs.db
+
+# Ignore Python cache
+__pycache__/
+*.pyc
