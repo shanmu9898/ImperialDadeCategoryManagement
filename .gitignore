@@ -4,6 +4,7 @@ Data/
 # Ignore system/editor files
 .DS_Store
 Thumbs.db
+Process_Overview.pptx
 
 # Ignore Python cache
 __pycache__/
