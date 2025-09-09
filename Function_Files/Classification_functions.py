@@ -122,7 +122,7 @@ def create_description_string(row: pd.Series, columns: List[str]) -> str:
         columns: List of column names to include
     
     Returns:
-        Formatted description string with column values and All Descriptions
+        Formatted description string with column values and Description with Attributes
     """
     try:
         validate_list_input(columns, "columns")
@@ -140,7 +140,7 @@ def create_description_string(row: pd.Series, columns: List[str]) -> str:
             description_parts.append(f"{col_name}: {value}, ")
 
     description_str = " ".join(description_parts).strip()
-    all_descriptions = str(row.get('All Descriptions', ''))
+    all_descriptions = str(row.get('Combined Descriptions', ''))
 
     return f"{description_str} {all_descriptions}".strip()
 
@@ -226,11 +226,10 @@ def _create_ai_prompts(output_str: str) -> Tuple[str, str]:
     
     return system_prompt, user_prompt
 
-
 def explain_top_qty_description(
     df: pd.DataFrame, 
     output_str: str, 
-    description_col: str = 'description',
+    description_col: str = 'Description with Attributes',
     qty_col: str = None
 ) -> Tuple[str, str]:
     """
@@ -282,6 +281,7 @@ def explain_top_qty_description(
     except Exception as e:
         print(f"Error during AI processing: {e}")
         return description_text, ""
+
 
 # =============================================================================
 # EXCEL PROCESSING FUNCTIONS
@@ -432,7 +432,7 @@ def extract_case_pack_with_examples(df, agent, default_pack_size=1000):
 
 
         user_prompt = (
-                "Given this product description: '{All Descriptions}' "
+                "Given this product description: '{Description with Attributes}' "
                 "extract the Case Pack number frm the description. Only return the number, no other text. If you cannot find a Case Pack number in the description, return 'N/A'."
         )
 
@@ -462,7 +462,7 @@ def extract_case_pack_with_examples(df, agent, default_pack_size=1000):
         return df
 
 
-def attribute_with_ai(im_final, agent, columns_for_description2, prompt_options_string,example_desc, example_output, default_pack_size=1000):
+def attribute_with_ai(im_final, agent, columns_for_description2, prompt_options_string, example_desc, example_output, default_pack_size=1000):
     ps = False
     columns_for_description = columns_for_description2.copy()
     case_pack_col = PipelineConfig.TRANSACTION_COLUMNS['case_pack']
@@ -486,14 +486,14 @@ def attribute_with_ai(im_final, agent, columns_for_description2, prompt_options_
 
     Not everything will be in the description, so you can leave things blank.
     """
-    user_prompt = "Pull out the relevant information based on this product description '{description}'"
+    user_prompt = "Pull out the relevant information based on this product description '{Description with Attributes}'"
 
     im_final = agent.format_df_prompts(im_final, system_prompt, user_prompt)
     im_final = agent.run_df_prompts(im_final)
     im_final = im_final.rename(columns={'openai_response': 'attributes'})
     
     if ps:
-        df = extract_case_pack_with_examples(df, agent, default_pack_size)
+        df = extract_case_pack_with_examples(im_final, agent, default_pack_size)
 
     return df
 
@@ -506,7 +506,7 @@ def extract_attributes_to_dataframe(
     df: pd.DataFrame, 
     columns_for_description2: List[str], 
     item_id_col: str = 'Entity--Item',
-    description_col: str = "All Descriptions",
+    description_col: str = "Description with Attributes",
     vendor_col: str = PipelineConfig.TRANSACTION_COLUMNS['vgn'],
     attribute_col: str = 'attributes',
     output_excel_filepath: Optional[str] = None

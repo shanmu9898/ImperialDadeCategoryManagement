@@ -294,6 +294,12 @@ def add_po_cost(transactions: pd.DataFrame, item_master: pd.DataFrame) -> pd.Dat
     # Clean up temporary columns
     transactions_with_po = transactions_with_po.drop('match_key', axis=1)
     
+    # Initialize counters to avoid referencing before assignment
+    qty_updates = 0
+    gross_cost_updates = 0
+    net_cost_updates = 0
+    po_cost_updates = 0
+
     # Handle Qty calculation when Qty = 0, Net Cost > 0, and PO cost is available
     # Calculate Qty = Net Cost / PO Cost for these cases
     qty_update_mask = (
@@ -315,9 +321,11 @@ def add_po_cost(transactions: pd.DataFrame, item_master: pd.DataFrame) -> pd.Dat
         new_qty_values = new_qty_values.astype(original_qty_dtype)
         
         transactions_with_po.loc[qty_update_mask, PipelineConfig.TRANSACTION_COLUMNS['qty']] = new_qty_values
-        
         qty_updates = qty_update_mask.sum()
-        print(f"  Updated {qty_updates} transactions with Qty = Net Cost / PO Cost")
+
+
+    print(f"  Updated {qty_updates} transactions with Qty = Net Cost / PO Cost")
+
     
     # Handle Gross Cost calculation when Qty > 0, Gross Cost <= 0, and PO cost is available
     # Calculate Gross Cost = PO Cost × Qty for these cases

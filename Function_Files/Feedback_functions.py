@@ -134,7 +134,6 @@ def consolidate_feedback_from_excel(
                         'Subs': sub_item_id_val,
                         'Correct': sub_row.get('Accept/Reject'),
                         'Feedback': sub_row.get('Feedback'),
-                        'Match Type': sub_row.get('Match Type'),
                         'Subcategory': sub_row.get('Subcategory')
                     })
                 
@@ -216,23 +215,26 @@ def get_reviewed_coverage(
     Returns:
         DataFrame with coverage metrics for Private Label items
     """
-    # Create coverage dataframe using current columns: Net Cost, Qty, Gross Cost
+    # Create Private Label mask: values starting with 'Y'
+    pl_mask = im_final[TRANSACTION_COLUMNS['vb_flag']].astype(str).str.startswith('Y', na=False)
+
+    # Create coverage dataframe with desired order: Qty, Gross Cost, Net Cost
     coverage = pd.DataFrame({
-        'Net Cost': [im_final[im_final[TRANSACTION_COLUMNS['vb_flag']] == 'Y - VB'][TRANSACTION_COLUMNS['net_cost']].sum()],
-        'Qty': [im_final[im_final[TRANSACTION_COLUMNS['vb_flag']] == 'Y - VB'][TRANSACTION_COLUMNS['qty']].sum()],
-        'Gross Cost': [im_final[im_final[TRANSACTION_COLUMNS['vb_flag']] == 'Y - VB'][TRANSACTION_COLUMNS['gross_cost']].sum()],
-        'GM': [im_final[im_final[TRANSACTION_COLUMNS['vb_flag']] == 'Y - VB'][TRANSACTION_COLUMNS['gross_cost']].sum() - im_final[im_final[TRANSACTION_COLUMNS['vb_flag']] == 'Y - VB'][TRANSACTION_COLUMNS['net_cost']].sum()]
+        'Qty': [im_final[pl_mask][TRANSACTION_COLUMNS['qty']].sum()],
+        'Gross Cost': [im_final[pl_mask][TRANSACTION_COLUMNS['gross_cost']].sum()],
+        'Net Cost': [im_final[pl_mask][TRANSACTION_COLUMNS['net_cost']].sum()]
     })
     # Name the row Private Label
     coverage.index = ['Private Label']
 
-    # Get reviewed PL SKUs metrics
-    reviewed_pl_items = im_final[im_final['Entity--Item'].isin(im_final_with_feedback['Targets'].unique())]
+    # Get reviewed PL SKUs metrics (only within Private Label mask)
+    reviewed_pl_items = im_final[
+        pl_mask & im_final['Entity--Item'].isin(im_final_with_feedback['Targets'].unique())
+    ]
     coverage.loc['Reviewed PL SKUs'] = [
-        reviewed_pl_items[TRANSACTION_COLUMNS['net_cost']].sum(),
         reviewed_pl_items[TRANSACTION_COLUMNS['qty']].sum(),
         reviewed_pl_items[TRANSACTION_COLUMNS['gross_cost']].sum(),
-        reviewed_pl_items[TRANSACTION_COLUMNS['gross_cost']].sum() - reviewed_pl_items[TRANSACTION_COLUMNS['net_cost']].sum()
+        reviewed_pl_items[TRANSACTION_COLUMNS['net_cost']].sum()
     ]
     
     coverage = coverage.T
@@ -243,10 +245,9 @@ def get_reviewed_coverage(
     
     # Add Total column (all items, not just PL)
     coverage['Total'] = [
-        im_final[TRANSACTION_COLUMNS['net_cost']].sum(),
         im_final[TRANSACTION_COLUMNS['qty']].sum(),
         im_final[TRANSACTION_COLUMNS['gross_cost']].sum(),
-        im_final[TRANSACTION_COLUMNS['gross_cost']].sum() - im_final[TRANSACTION_COLUMNS['net_cost']].sum()
+        im_final[TRANSACTION_COLUMNS['net_cost']].sum()
     ]
     
     coverage['% Reviewed of Total'] = coverage['Reviewed PL SKUs'] / coverage['Total'].replace(0, 1)
@@ -418,7 +419,8 @@ def user_prompts_with_rules(
     use_faiss: bool = True,
     use_levenshtein: bool = True,
     use_subcategory_rules: bool = False,
-    subcategory_col: str = 'Subcategory'
+    subcategory_col: str = 'Subcategory',
+    only_rejects: bool = False
 ) -> Tuple[List[str], Dict[int, str]]:
     """
     Generates formatted text prompts for an AI model to determine item swappability.
@@ -435,6 +437,7 @@ def user_prompts_with_rules(
         use_levenshtein: Whether to use Levenshtein similarity filtering
         use_subcategory_rules: If True, generate subcategory-specific rules instead of unified rules
         subcategory_col: Column name containing subcategory information
+        only_rejects: If True, build rules only from reject feedback (if available), otherwise use all feedback
     
     Returns:
         Tuple of (user_prompts, numerical_id_to_entity_id_map)
@@ -487,7 +490,7 @@ def user_prompts_with_rules(
         dim = embeddings.shape[1]
         index = faiss.IndexFlatIP(dim)
         index.add(embeddings)
-    levenshtein_col = 'for_embedding' if 'for_embedding' in im_final_full.columns else 'description'
+    levenshtein_col = 'for_embedding' if 'for_embedding' in im_final_full.columns else 'Combined Descriptions'
     im_final_full[levenshtein_col] = im_final_full.get(levenshtein_col, "").apply(_clean_str)
     all_im_final_levenshtein_texts = im_final_full[levenshtein_col].tolist()
 
@@ -497,6 +500,20 @@ def user_prompts_with_rules(
         distance = Levenshtein.distance(s1, s2)
         max_len = max(len(s1), len(s2))
         return 1.0 - (distance / max_len) if max_len else 1.0
+
+    # --- Filter feedback data based on only_rejects parameter ---
+    if only_rejects and isinstance(merged_df, pd.DataFrame) and not merged_df.empty:
+        # Filter to only reject feedback
+        reject_values =['Reject']
+        original_feedback_count = len(merged_df)
+        merged_df = merged_df[merged_df['Correct'].isin(reject_values)].copy()
+        reject_feedback_count = len(merged_df)
+        print(f"Filtered feedback to only rejects: {reject_feedback_count}/{original_feedback_count} records")
+        
+        if merged_df.empty:
+            print("Warning: No reject feedback found. Proceeding with empty rules.")
+    elif only_rejects:
+        print("Warning: only_rejects=True but no feedback data available. Proceeding with empty rules.")
 
     # --- Rule Generation (MODIFIED BLOCK) ---
     if use_subcategory_rules:
@@ -632,8 +649,8 @@ If an item doesn't seem like it is swappable you can replace it with None.
                     continue
             top_items_data.append({
                 'Numerical_ID': candidate_row['Numerical_ID'],
-                'description_display': _clean_str(candidate_row.get('description', '')),
-                'attributes_list': _process_attributes(candidate_row.get('openai_response', ''))
+                'description_display': _clean_str(candidate_row.get('Combined Descriptions', '')),
+                'attributes_list': _process_attributes(candidate_row.get('attributes', ''))
             })
         
         # --- Determine which rules to use for this prompt ---
@@ -660,8 +677,8 @@ If an item doesn't seem like it is swappable you can replace it with None.
         # --- Render the template with the appropriate rules ---
         prompt = jinja_template.render(
             eid_numerical=row['Numerical_ID'],
-            description_display=_clean_str(row.get('description', '')),
-            attributes_list=_process_attributes(row.get('openai_response')),
+            description_display=_clean_str(row.get('Combined Descriptions', '')),
+            attributes_list=_process_attributes(row.get('attributes')),
             top_items=top_items_data,
             generated_rules=rules_for_prompt
         )

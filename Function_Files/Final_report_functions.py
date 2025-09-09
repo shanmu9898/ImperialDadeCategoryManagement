@@ -30,7 +30,6 @@ EXCEL_CONFIG = {
 # Report sheet names
 REPORT_SHEETS = {
     'suggested_swaps': 'Suggested Swaps',
-    'drop_list': 'Drop List',
     'vendor_summary': 'Vendor Performance Summary',
     'customer_summary': 'Customer Performance Summary'
 }
@@ -47,6 +46,7 @@ EXCEL_FORMATS = {
     'vendor_volume_bg': '#CCE5FF',
     'vendor_sales_bg': '#FFE5CC',
     'customer_header_bg': '#E0EBF5',
+    'light_green_bg': '#E6FFE6',
     'customer_volume_bg': '#CCE5FF',
     'customer_sales_bg': '#FFE5CC',
     'dark_blue_bg': '#1f497d'
@@ -142,6 +142,18 @@ def _create_excel_formats(workbook) -> Dict:
         'bold': True, 'text_wrap': True, 'valign': 'top', 
         'fg_color': EXCEL_FORMATS['vendor_sales_bg'], 'border': 1, 'align': 'center'
     })
+    formats['light_green_header'] = workbook.add_format({
+        'bold': True, 'text_wrap': True, 'valign': 'top', 
+        'fg_color': EXCEL_FORMATS['light_green_bg'], 'border': 1, 'align': 'center'
+    })
+    formats['light_green_cell'] = workbook.add_format({
+        'text_wrap': True, 'valign': 'top', 'border': 1,
+        'fg_color': EXCEL_FORMATS['light_green_bg']
+    })
+    formats['light_green_number'] = workbook.add_format({
+        'num_format': '#,##0.00', 'text_wrap': True, 'valign': 'top', 'border': 1,
+        'fg_color': EXCEL_FORMATS['light_green_bg']
+    })
 
     # Customer Performance Summary sheet specific properties
     formats['customer_header_general'] = workbook.add_format({
@@ -169,7 +181,9 @@ def _create_excel_formats(workbook) -> Dict:
 def _get_cell_format(formats: Dict, column_name: str, is_header: bool = False) -> Any:
     """Get appropriate cell format based on column name and type."""
     if is_header:
-        if 'Volume' in column_name:
+        if 'Final Qty' in column_name or 'Change in Qty' in column_name:
+            return formats['light_green_header']
+        elif 'Volume' in column_name:
             return formats['vendor_header_volume']
         elif 'Sales' in column_name:
             return formats['vendor_header_sales']
@@ -182,6 +196,8 @@ def _get_cell_format(formats: Dict, column_name: str, is_header: bool = False) -
             return formats['percentage']
         elif '%' in column_name:
             return formats['percentage']
+        elif 'Final Qty' in column_name or 'Change in Qty' in column_name:
+            return formats['light_green_number']
         elif 'Volume' in column_name:
             return formats['general_number']
         else:
@@ -358,26 +374,6 @@ def _create_suggested_swaps_data(df: pd.DataFrame, feedback_df: pd.DataFrame,
     
     return orig_data
 
-
-def _create_drop_list_data(df: pd.DataFrame, item_id_col: str, vendor_col: str,
-                          all_descriptions_col: str, attribute_col: str,
-                          sales_col: str, cogs_col: str, private_label_col: str,
-                          l3m_adj_vol_col: str) -> pd.DataFrame:
-    """Create the drop list data for the report."""
-    # Filter for items with suggested volume = 0
-    drop_list = df[df['suggest_volume'] == 0].copy()
-    
-    if drop_list.empty:
-        return pd.DataFrame()
-    
-    # Select relevant columns
-    drop_list_data = drop_list[[item_id_col, vendor_col, all_descriptions_col, 
-                               attribute_col, sales_col, cogs_col, private_label_col, 
-                               l3m_adj_vol_col]].copy()
-    
-    return drop_list_data
-
-
 # =============================================================================
 # SHEET CREATION HELPER FUNCTIONS
 # =============================================================================
@@ -393,7 +389,7 @@ def _create_suggested_swaps_sheet(writer, workbook, df: pd.DataFrame, volume_red
     suggest_volume_col = kwargs.get('suggest_volume_col', 'suggest_volume')
     item_id_col = kwargs.get('item_id_col', 'Entity--Item')
     vendor_col = kwargs.get('vendor_col', TRANSACTION_COLUMNS['vgn'])
-    all_descriptions_col = kwargs.get('all_descriptions_col', 'All Descriptions')
+    all_descriptions_col = kwargs.get('all_descriptions_col', 'Combined Descriptions')
     attribute_col = kwargs.get('attribute_col', 'attributes')
     sales_col = kwargs.get('sales_col', TRANSACTION_COLUMNS['gross_cost'])
     cogs_col = kwargs.get('cogs_col', TRANSACTION_COLUMNS['net_cost'])
@@ -421,31 +417,6 @@ def _create_suggested_swaps_sheet(writer, workbook, df: pd.DataFrame, volume_red
     # Create worksheet and write data
     worksheet = _create_worksheet(writer, workbook, sheet_name, engine_to_use)
     _write_suggested_swaps_data(worksheet, workbook, suggest_swaps_df_final, formats, engine_to_use)
-
-def _create_drop_list_sheet(writer, workbook, df: pd.DataFrame, formats: Dict, 
-                          engine_to_use: str, **kwargs) -> None:
-    """Create the Drop List sheet."""
-    sheet_name = REPORT_SHEETS['drop_list']
-    print(f"\n--- Processing Sheet: {sheet_name} ---")
-    
-    # Extract column names from kwargs
-    suggest_volume_col = kwargs.get('suggest_volume_col', 'suggest_volume')
-    item_id_col = kwargs.get('item_id_col', 'Entity--Item')
-    vendor_col = kwargs.get('vendor_col', TRANSACTION_COLUMNS['vgn'])
-    all_descriptions_col = kwargs.get('all_descriptions_col', 'All Descriptions')
-    attribute_col = kwargs.get('attribute_col', 'attributes')
-    sales_col = kwargs.get('sales_col', TRANSACTION_COLUMNS['gross_cost'])
-    cogs_col = kwargs.get('cogs_col', TRANSACTION_COLUMNS['net_cost'])
-    private_label_col = kwargs.get('private_label_col', TRANSACTION_COLUMNS['vb_flag'])
-    l3m_adj_vol_col = kwargs.get('l3m_adj_vol_col', TRANSACTION_COLUMNS['qty'])
-    
-    # Create drop list data
-    drop_list_data = _create_drop_list_data(df, item_id_col, vendor_col, all_descriptions_col,
-                                          attribute_col, sales_col, cogs_col, private_label_col, l3m_adj_vol_col)
-    
-    # Create worksheet and write data
-    worksheet = _create_worksheet(writer, workbook, sheet_name, engine_to_use)
-    _write_worksheet_data(worksheet, drop_list_data, formats)
 
 def _create_vendor_summary_sheet(writer, workbook, df: pd.DataFrame, formats: Dict,
                                engine_to_use: str, **kwargs) -> None:
@@ -550,7 +521,7 @@ def _create_swap_details_dataframe(df: pd.DataFrame, volume_redistribution_dict:
     # Extract column names
     item_id_col = kwargs.get('item_id_col', 'Entity--Item')
     vendor_col = kwargs.get('vendor_col', TRANSACTION_COLUMNS['vgn'])
-    all_descriptions_col = kwargs.get('all_descriptions_col', 'All Descriptions')
+    all_descriptions_col = kwargs.get('all_descriptions_col', 'Combined Descriptions')
     attribute_col = kwargs.get('attribute_col', 'attributes')
     sales_col = kwargs.get('sales_col', TRANSACTION_COLUMNS['gross_cost'])
     cogs_col = kwargs.get('cogs_col', TRANSACTION_COLUMNS['net_cost'])
@@ -649,6 +620,39 @@ def _determine_review_status(from_entity_id: str, to_entity_id: str, target_sku_
         return True
     
     return False
+
+
+def _determine_review_status_comprehensive(from_entity_id: str, to_entity_id: str, feedback_df: pd.DataFrame) -> str:
+    """Determine if a swap has been reviewed based on feedback DataFrame."""
+    if feedback_df is None or feedback_df.empty:
+        return 'No'
+    
+    # Convert to string for comparison
+    from_entity_id = str(from_entity_id)
+    to_entity_id = str(to_entity_id)
+    
+    # Check if either ID is in the Targets column
+    if 'Targets' in feedback_df.columns:
+        targets_in_feedback = set(feedback_df['Targets'].astype(str).dropna().unique())
+        if from_entity_id in targets_in_feedback or to_entity_id in targets_in_feedback:
+            return 'Yes'
+    
+    # Check for mutual acceptance/consideration
+    if 'Targets' in feedback_df.columns and 'Subs' in feedback_df.columns and 'Correct' in feedback_df.columns:
+        accepted_or_considered = feedback_df[
+            (feedback_df['Correct'] == 'Accept') | (feedback_df['Correct'] == 'Consider')
+        ]
+        
+        for _, row in accepted_or_considered.iterrows():
+            target = str(row['Targets'])
+            sub = str(row['Subs'])
+            
+            # Check if this is a mutual relationship
+            if ((from_entity_id == target and to_entity_id == sub) or 
+                (to_entity_id == target and from_entity_id == sub)):
+                return 'Yes'
+    
+    return 'No'
 
 def _create_vendor_summary_data(df: pd.DataFrame, suggest_volume_col: str, item_id_col: str,
                               vendor_col: str, sales_col: str, l3m_adj_vol_col: str) -> pd.DataFrame:
@@ -794,62 +798,6 @@ def _write_suggested_swaps_data(worksheet, workbook, df: pd.DataFrame, formats: 
         # Freeze panes at row 3 (headers)
         worksheet.freeze_panes(3, 0)
 
-def _write_drop_list_data(worksheet, workbook, df: pd.DataFrame, formats: Dict, engine_to_use: str) -> None:
-    """Write drop list data to worksheet with proper formatting."""
-    if engine_to_use == 'xlsxwriter':
-        # Add dark blue placeholder row at the top spanning all columns
-        dark_blue_format = workbook.add_format({'bold': False, 'fg_color': '#1f497d', 'font_color': 'white', 'align': 'left'})
-        header_text = "List of SKUs being dropped. These are inclusive of the SKUs in the originating columns of the 'Suggested Swaps' tab with Drop_Reason being Volume Swapped Away. There are also some of potential SKUs to drop based on if they are low GM"
-        worksheet.write(0, 0, header_text, dark_blue_format)
-        worksheet.merge_range(0, 0, 0, len(df.columns), header_text, dark_blue_format)
-        
-        # Set column A to be narrow
-        worksheet.set_column(0, 0, 5)
-        
-        # Write headers starting at B3 (row 2, column 1)
-        for col_num, value in enumerate(df.columns.values):
-            header_format = _get_cell_format(formats, value, is_header=True)
-            worksheet.write(2, col_num + 1, value, header_format)  # +1 to start at column B
-        
-        # Write data starting at B4 (row 3, column 1)
-        if not df.empty:
-            for df_row_idx, data_tuple in enumerate(df.itertuples(index=False)):
-                excel_row_num = df_row_idx + 3  # Start at row 3 (index 2)
-                # Set row height to allow for text wrapping (similar to old function approach)
-                worksheet.set_row(excel_row_num, 30)  # Set row height to accommodate wrapped text
-                for col_idx, col_name in enumerate(df.columns):
-                    cell_value = data_tuple[col_idx]
-                    cell_format = _get_cell_format(formats, col_name, is_header=False)
-                    if col_name == 'Accept/Reject':
-                        cell_format = formats.get('accept_reject_cell', cell_format)
-                    
-                    if pd.notna(cell_value):
-                        worksheet.write(excel_row_num, col_idx + 1, cell_value, cell_format)  # +1 to start at column B
-                    else:
-                        worksheet.write_blank(excel_row_num, col_idx + 1, None, cell_format)  # +1 to start at column B
-        
-        # Set column widths
-        col_widths_drop = {
-            'Entity--Item': 25, 'VGN': 25, 'vendor_name': 25, 'All Descriptions': 50, 'attributes': 40, 
-            'Drop_Reason': 35, 'Accept/Reject': 15, 'Feedback': 40
-        }
-        for i, col_name in enumerate(df.columns):
-            width = col_widths_drop.get(col_name, 15)
-            worksheet.set_column(i + 1, i + 1, width)  # +1 to account for column A
-        
-        # Add data validation for Accept/Reject dropdown
-        if not df.empty and 'Accept/Reject' in df.columns:
-            try:
-                accept_reject_col_idx = df.columns.get_loc('Accept/Reject')
-                data_validation_options = ["Accept", "Reject"]
-                for row_num_excel in range(3, len(df) + 3):  # Start at row 3 (data rows)
-                    worksheet.data_validation(row_num_excel, accept_reject_col_idx + 1, row_num_excel, accept_reject_col_idx + 1,  # +1 to account for column A
-                                            {'validate': 'list', 'source': data_validation_options})
-            except KeyError:
-                pass  # Column doesn't exist, skip validation
-        
-        # Freeze panes at row 3 (headers)
-        worksheet.freeze_panes(3, 0)
 
 def _write_vendor_summary_data(worksheet, workbook, df: pd.DataFrame, formats: Dict, engine_to_use: str) -> None:
     """Write vendor summary data to worksheet with proper formatting."""
@@ -1048,7 +996,7 @@ def _create_suggested_swaps_sheet_new(writer, workbook, updated_df: pd.DataFrame
                 
                 # Get originating item details from current row (which has all the data from analyze_swap_results)
                 orig_vendor = row.get('VGN', 'N/A')
-                orig_description = row.get('All Descriptions', 'N/A')
+                orig_description = row.get('Combined Descriptions', 'N/A')
                 orig_attributes = row.get('attributes', '')
                 orig_pl_flag = row.get('PL_Flag', 'N/A')
                 
@@ -1058,7 +1006,7 @@ def _create_suggested_swaps_sheet_new(writer, workbook, updated_df: pd.DataFrame
                 if not recv_details.empty:
                     recv_row = recv_details.iloc[0]
                     recv_vendor = recv_row.get('VGN', 'N/A')
-                    recv_description = recv_row.get('All Descriptions', 'N/A')
+                    recv_description = recv_row.get('Combined Descriptions', 'N/A')
                     recv_attributes = recv_row.get('attributes', '')
                     recv_pl_flag = recv_row.get('PL_Flag', 'N/A')
                     recv_volume = recv_row.get('Final_Volume', 0)
@@ -1084,7 +1032,7 @@ def _create_suggested_swaps_sheet_new(writer, workbook, updated_df: pd.DataFrame
                     'Receiving PL Flag': recv_pl_flag,
                     'Receiving Qty': recv_volume,
                     'Savings': row.get('Savings_From_Swapping_Away', 0),  # Use Savings_From_Swapping_Away for originating item swaps
-                    'Reviewed': 'Yes' if 'Targets' in im_final_with_feedback.columns and orig_item in im_final_with_feedback['Targets'].values else 'No',
+                    'Reviewed': _determine_review_status_comprehensive(orig_item, recv_item, im_final_with_feedback),
                     'Accept/Reject': 'Accept',
                     'Feedback': ''
                 })
@@ -1101,75 +1049,49 @@ def _create_suggested_swaps_sheet_new(writer, workbook, updated_df: pd.DataFrame
     worksheet = _create_worksheet(writer, workbook, sheet_name, engine_to_use)
     _write_suggested_swaps_data(worksheet, workbook, empty_df, formats, engine_to_use)
 
-def _create_drop_list_sheet_new(writer, workbook, updated_df: pd.DataFrame, 
-                               im_final_with_feedback: pd.DataFrame, formats: Dict, 
-                               engine_to_use: str, im_final: pd.DataFrame = None) -> None:
-    """Create the Drop List sheet using new DataFrame structure.
-    
-    Args:
-        im_final: Optional original item master DataFrame with vendor names, descriptions, and attributes
-    """
-    sheet_name = REPORT_SHEETS['drop_list']
-    print(f"\n--- Processing Sheet: {sheet_name} ---")
-    
-    # Filter for items with Final_Volume = 0
-    drop_list_df = updated_df[updated_df['Final_Volume'] == 0].copy()
-    
-    if not drop_list_df.empty:
-        # Start with the drop_list_df (which now has VGN, All Descriptions, attributes, PL_Flag from analyze_swap_results)
-        drop_list_details = drop_list_df.copy()
-        
-        # Add required columns for drop list format with default values if missing
-        if 'Drop_Reason' not in drop_list_details.columns:
-            drop_list_details['Drop_Reason'] = 'Volume Set to Zero'
-        if 'Accept/Reject' not in drop_list_details.columns:
-            drop_list_details['Accept/Reject'] = 'Accept'
-        if 'Feedback' not in drop_list_details.columns:
-            drop_list_details['Feedback'] = ''
-            
-        # Select and reorder columns to match expected format
-        expected_cols = ['Entity--Item', 'VGN', 'All Descriptions', 'attributes', 'Drop_Reason', 'Accept/Reject', 'Feedback']
-        available_cols = [col for col in expected_cols if col in drop_list_details.columns]
-        drop_list_details = drop_list_details[available_cols]
-    else:
-        # Create empty DataFrame with expected columns
-        expected_cols = ['Entity--Item', 'VGN', 'All Descriptions', 'attributes', 'Drop_Reason', 'Accept/Reject', 'Feedback']
-        drop_list_details = pd.DataFrame(columns=expected_cols)
-    
-    # Create worksheet and write data
-    worksheet = _create_worksheet(writer, workbook, sheet_name, engine_to_use)
-    _write_drop_list_data(worksheet, workbook, drop_list_details, formats, engine_to_use)
 
 def _create_vendor_summary_sheet_new(writer, workbook, updated_df: pd.DataFrame, 
                                     formats: Dict, engine_to_use: str) -> None:
-    """Create the Vendor Performance Summary sheet using new DataFrame structure."""
+    """Create the Vendor Performance Summary sheet with supplier, original qty, qty swapped to, qty swapped away, final qty, change in qty, change in qty %, and savings."""
     sheet_name = REPORT_SHEETS['vendor_summary']
     print(f"\n--- Processing Sheet: {sheet_name} ---")
     
     # Group by Original_Supplier and calculate metrics
     vendor_summary = updated_df.groupby('Original_Supplier').agg({
         'Original_Volume': 'sum',
-        'Final_Volume': 'sum',
+        'Volume_Swapped_To': 'sum',
+        'Volume_Swapped_Away': 'sum',
         'Savings_From_Swapping_To': 'sum'
     }).reset_index()
     
-    # Column names are already flat since we're using single aggregation functions
-    
     # Rename columns for output
     vendor_summary = vendor_summary.rename(columns={
-        'Original_Volume': 'Total Original Qty (Units)',
-        'Final_Volume': 'Total Final Qty (Units)',
+        'Original_Supplier': 'Supplier',
+        'Original_Volume': 'Original Qty (Units)',
+        'Volume_Swapped_To': 'Qty Swapped To (Units)',
+        'Volume_Swapped_Away': 'Qty Swapped Away (Units)',
         'Savings_From_Swapping_To': 'Savings From Swapping To ($)'
     })
     
-    # Calculate percentage change: (Final - Original) / Original * 100
-    vendor_summary['% Change'] = ((vendor_summary['Total Final Qty (Units)'] - vendor_summary['Total Original Qty (Units)']) / 
-                                  vendor_summary['Total Original Qty (Units)'] * 100).round(2)
+    # Calculate Final Qty = Original + Swapped To - Swapped Away
+    vendor_summary['Final Qty (Units)'] = (vendor_summary['Original Qty (Units)'] + 
+                                          vendor_summary['Qty Swapped To (Units)'] - 
+                                          vendor_summary['Qty Swapped Away (Units)'])
     
-    # Handle division by zero (if Original Qty is 0)
-    vendor_summary['% Change'] = vendor_summary['% Change'].fillna(0)
+    # Calculate Change in Qty (Units) = Final - Original
+    vendor_summary['Change in Qty (Units)'] = (vendor_summary['Final Qty (Units)'] - 
+                                              vendor_summary['Original Qty (Units)'])
     
-    vendor_summary_sorted = vendor_summary.sort_values(by='Total Original Qty (Units)', ascending=False)
+    # Calculate Change in Qty (%) = (Final - Original) / Original * 100
+    vendor_summary['Change in Qty (%)'] = np.where(
+        vendor_summary['Original Qty (Units)'] > 0,
+        ((vendor_summary['Final Qty (Units)'] - vendor_summary['Original Qty (Units)']) /
+         vendor_summary['Original Qty (Units)'] * 100).round(2),
+        0  # Set to 0% when original quantity is 0
+    )
+    
+    # Sort by final quantity descending
+    vendor_summary_sorted = vendor_summary.sort_values(by='Final Qty (Units)', ascending=False)
     
     # Create worksheet and write data
     worksheet = _create_worksheet(writer, workbook, sheet_name, engine_to_use)
@@ -1254,7 +1176,7 @@ def create_enhanced_sku_report(
     output_excel_filepath: str,
     item_id_col: str = 'Entity--Item',
     vendor_col: str = TRANSACTION_COLUMNS['vgn'],
-    all_descriptions_col: str = 'All Descriptions',
+    all_descriptions_col: str = 'Combined Descriptions',
     attribute_col: str = 'attributes',
     matches_col: str = 'Matches',
     gross_cost_col: str = TRANSACTION_COLUMNS['gross_cost'],
@@ -1262,16 +1184,14 @@ def create_enhanced_sku_report(
     private_label_col: str = TRANSACTION_COLUMNS['vb_flag'],
     qty_col: str = TRANSACTION_COLUMNS['qty'],
     redi_customers: Optional[List] = None,
-    customer_exclusions: Optional[List] = None,
-    im_final: pd.DataFrame = None
+    customer_exclusions: Optional[List] = None
 ) -> bool:
     """
-    Creates an Excel file with "Suggested Swaps", "Drop List", "Vendor Performance Summary",
+    Creates an Excel file with "Suggested Swaps", "Vendor Performance Summary",
     and "Customer Performance Summary" sheets using the new DataFrame structure.
     
     This function generates a comprehensive report with optimization results, including:
     - Suggested swaps with originating and receiving SKU details
-    - Drop list of items with zero final volume
     - Vendor performance summary with quantity metrics
     - Customer performance summary showing impact of changes
     
@@ -1286,7 +1206,7 @@ def create_enhanced_sku_report(
         output_excel_filepath (str): Full path for the output Excel file.
         item_id_col (str): Name of the Entity ID column.
         vendor_col (str): Name of the vendor name column.
-        all_descriptions_col (str): Name of the column containing all descriptions.
+        all_descriptions_col (str): Name of the column containing Combined Descriptions.
         attribute_col (str): Name of the column for "Attributes".
         matches_col (str): Name of the column with list of matches.
         gross_cost_col (str): Name of the gross cost column.
@@ -1295,7 +1215,6 @@ def create_enhanced_sku_report(
         qty_col (str): Name of the quantity column.
         redi_customers (list, optional): List of redistributor customer codes.
         customer_exclusions (list, optional): List of customer codes to exclude.
-        im_final (pd.DataFrame, optional): Original item master DataFrame with vendor names, descriptions, and attributes.
 
     Returns:
         bool: True if the Excel file was created successfully, False otherwise.
@@ -1312,7 +1231,7 @@ def create_enhanced_sku_report(
     # Validate required columns in updated_df
     required_updated_cols = ['Entity--Item', 'Original_Volume', 'Final_Volume', 'Volume_Change',
                            'Original_Cost', 'Original_Supplier', 'New_Supplier', 'VGN', 
-                           'All Descriptions', 'attributes', 'PL_Flag', 'Action', 
+                           'Combined Descriptions', 'attributes', 'PL_Flag', 'Action', 
                            'Savings_From_Swapping_Away', 'Savings_From_Swapping_To']
     validate_columns_exist(updated_df, required_updated_cols, "updated_df")
     
@@ -1333,9 +1252,6 @@ def create_enhanced_sku_report(
             _create_suggested_swaps_sheet_new(writer, workbook, updated_df, im_final_with_feedback, 
                                             formats, EXCEL_CONFIG['engine'])
             
-            _create_drop_list_sheet_new(writer, workbook, updated_df, im_final_with_feedback,
-                                      formats, EXCEL_CONFIG['engine'], im_final)
-            
             _create_vendor_summary_sheet_new(writer, workbook, updated_df, formats, 
                                            EXCEL_CONFIG['engine'])
             
@@ -1353,80 +1269,45 @@ def create_enhanced_sku_report(
 
 def read_and_process_feedback_excel(
     excel_filepath: str,
-    drop_list_sheet_name: str = REPORT_SHEETS['drop_list'],
     suggest_swaps_sheet_name: str = REPORT_SHEETS['suggested_swaps'],
-    drop_list_item_col: str = 'Entity--Item',
     suggest_swaps_orig_sku_col: str = 'Originating SKU ID',
     suggest_swaps_recv_sku_col: str = 'Receiving SKU ID',
     accept_reject_col: str = 'Accept/Reject',
     feedback_col: str = 'Feedback'
-) -> Tuple[pd.DataFrame, pd.DataFrame]:
+) -> pd.DataFrame:
     """
-    Reads the "Drop List" and "Suggested Swaps" sheets from a specified Excel file
-    and returns two DataFrames with selected columns.
+    Reads the "Suggested Swaps" sheet from a specified Excel file
+    and returns a DataFrame with selected columns.
 
     Args:
         excel_filepath (str): The full path to the Excel file.
-        drop_list_sheet_name (str): Name of the sheet containing the drop list.
         suggest_swaps_sheet_name (str): Name of the sheet containing suggested swaps.
-        drop_list_item_col (str): Name of the SKU ID column in the "Drop List" sheet.
         suggest_swaps_orig_sku_col (str): Name of the originating SKU ID column in "Suggested Swaps".
         suggest_swaps_recv_sku_col (str): Name of the receiving SKU ID column in "Suggested Swaps".
         accept_reject_col (str): Name of the column containing "Accept/Reject" status.
         feedback_col (str): Name of the column containing feedback.
 
     Returns:
-        tuple: (pd.DataFrame, pd.DataFrame)
-            - drop_list_df: DataFrame with [drop_list_item_col, accept_reject_col, feedback_col]
-                            from the "Drop List" sheet.
-            - suggested_swaps_df: DataFrame with [suggest_swaps_orig_sku_col, 
-                                   suggest_swaps_recv_sku_col, accept_reject_col, feedback_col]
-                                   from the "Suggested Swaps" sheet.
-            Returns (None, None) if the file doesn't exist or sheets are not found.
+        pd.DataFrame: DataFrame with [suggest_swaps_orig_sku_col, 
+                     suggest_swaps_recv_sku_col, accept_reject_col, feedback_col]
+                     from the "Suggested Swaps" sheet.
+                     Returns None if the file doesn't exist or sheet is not found.
     """
     print(f"--- Reading feedback from Excel file: {excel_filepath} ---")
 
     if not os.path.exists(excel_filepath):
         print(f"Error: Excel file not found at {excel_filepath}")
-        return None, None
+        return None
 
     try:
         xls = pd.ExcelFile(excel_filepath)
     except Exception as e:
         print(f"Error opening Excel file: {e}")
-        return None, None
-
-    drop_list_df = pd.DataFrame()
-    suggested_swaps_df = pd.DataFrame()
-
-    # --- Process "Drop List" sheet ---
-    if drop_list_sheet_name in xls.sheet_names:
-        print(f"Processing sheet: {drop_list_sheet_name}...")
-        try:
-            # Read Excel starting from B3 (skip first 2 rows and first column)
-            df_drop = pd.read_excel(xls, sheet_name=drop_list_sheet_name, skiprows=2, usecols=lambda x: x != 'A')
-            required_drop_cols = [drop_list_item_col, accept_reject_col, feedback_col]
-            
-            # Check if all required columns exist
-            missing_drop_cols = [col for col in required_drop_cols if col not in df_drop.columns]
-            if missing_drop_cols:
-                print(f"Warning: Sheet '{drop_list_sheet_name}' is missing columns: {', '.join(missing_drop_cols)}. Skipping this sheet for detailed extraction.")
-                drop_list_df = pd.DataFrame(columns=required_drop_cols) # Return empty df with expected columns
-            else:
-                drop_list_df = df_drop[required_drop_cols].copy()
-                print(f"Successfully extracted data from '{drop_list_sheet_name}'. Found {len(drop_list_df)} rows.")
-                
-        except Exception as e:
-            print(f"Error processing sheet '{drop_list_sheet_name}': {e}")
-            drop_list_df = pd.DataFrame(columns=[drop_list_item_col, accept_reject_col, feedback_col]) # Ensure it's an empty DF with correct columns on error
-    else:
-        print(f"Warning: Sheet '{drop_list_sheet_name}' not found in the Excel file.")
-        drop_list_df = pd.DataFrame(columns=[drop_list_item_col, accept_reject_col, feedback_col])
-
+        return None
 
     # --- Process "Suggested Swaps" sheet ---
     if suggest_swaps_sheet_name in xls.sheet_names:
-        print(f"\nProcessing sheet: {suggest_swaps_sheet_name}...")
+        print(f"Processing sheet: {suggest_swaps_sheet_name}...")
         try:
             # Read Excel starting from B3 (skip first 2 rows and first column)
             df_swaps = pd.read_excel(xls, sheet_name=suggest_swaps_sheet_name, skiprows=2, usecols=lambda x: x != 'A')
@@ -1452,7 +1333,7 @@ def read_and_process_feedback_excel(
         print(f"Warning: Sheet '{suggest_swaps_sheet_name}' not found in the Excel file.")
         suggested_swaps_df = pd.DataFrame(columns=[suggest_swaps_orig_sku_col, suggest_swaps_recv_sku_col, accept_reject_col, feedback_col])
 
-    return drop_list_df, suggested_swaps_df
+    return suggested_swaps_df
 
 def incorporate_swaps_feedback(
     im_final: pd.DataFrame,

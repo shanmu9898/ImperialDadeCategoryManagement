@@ -308,7 +308,7 @@ def _create_target_data(
     
     target_data = {
         item_id_col: target_entity_item,
-        'Description': target_description_val,
+        'Combined Descriptions': target_description_val,
         'is_target': True,
         net_cost_col: target_net_cost,
         qty_col: target_qty,
@@ -359,7 +359,7 @@ def _create_match_data(
     """
     match_info = {
         item_id_col: match_entity_item_id,
-        'Description': "ID not found",
+        'Combined Descriptions': "ID not found",
         'attributes': {},
         'is_target': False,
         net_cost_col: None,
@@ -386,7 +386,7 @@ def _create_match_data(
     
     # Populate match data
     match_info[item_id_col] = match_series.get(item_id_col, match_entity_item_id)
-    match_info['Description'] = match_series.get(actual_desc_col_to_use, "Desc. N/A")
+    match_info['Combined Descriptions'] = match_series.get(actual_desc_col_to_use, "Desc. N/A")
     
     match_net_cost = match_series.get(net_cost_col, 0.0) if net_cost_col in match_series else 0.0
     match_qty = match_series.get(qty_col, 0.0) if qty_col in match_series else 0.0
@@ -421,8 +421,8 @@ def write_top_matches(
     qty_col: str = TRANSACTION_COLUMNS['qty'],
     vendor_col: str = TRANSACTION_COLUMNS['vgn'],
     item_id_col: str = 'Entity--Item',
-    main_desc_col: str = 'All Descriptions',
-    fallback_desc_col: str = 'All Descriptions',
+    main_desc_col: str = 'Combined Descriptions',
+    fallback_desc_col: str = 'Description with Attributes',
     reasoning_col: str = 'reasoning',
     model_matches_col: str = 'Matches',
     openai_col: str = 'attributes',
@@ -743,7 +743,7 @@ def get_user_prompts(
     num_to_entity = dict(zip(df['Numerical_ID'], df['Entity--Item']))
 
     # Levenshtein source column fallback
-    lev_col = 'for_embedding' if 'for_embedding' in df.columns else 'All Descriptions'
+    lev_col = 'for_embedding' if 'for_embedding' in df.columns else 'Description with Attributes'
     df[lev_col] = df[lev_col].fillna('').astype(str)
     lev_texts = df[lev_col].tolist()
 
@@ -765,7 +765,7 @@ def get_user_prompts(
         index = faiss.IndexFlatIP(dim)
         index.add(embeddings)
 
-    df['description_display_str'] = df['All Descriptions'].fillna('').astype(str)
+    df['description_display_str'] = df['Description with Attributes'].fillna('').astype(str)
 
     template_str = """Original Item:
 - Entity ID: {{ eid_numerical }}
@@ -837,7 +837,7 @@ If an item doesn't seem like it is swappable you can return None.
             })
             if len(candidates) >= n:
                 break
-
+  
         prompt = template.render(
             eid_numerical=current_num_id,
             description_display=current_desc,
@@ -1226,7 +1226,7 @@ def _create_individual_worksheet(
         c_idx_write = 0
         worksheet.write(excel_data_row, c_idx_write, item_d.get(item_id_col), item_id_f)
         c_idx_write += 1
-        worksheet.write(excel_data_row, c_idx_write, item_d.get('Description'), desc_f)
+        worksheet.write(excel_data_row, c_idx_write, item_d.get('Combined Descriptions'), desc_f)
         c_idx_write += 1
         
         # Handle Net Cost/Qty - show '-' if Qty is 0 or NaN/INF

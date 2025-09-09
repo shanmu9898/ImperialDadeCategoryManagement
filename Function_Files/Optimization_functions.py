@@ -664,14 +664,18 @@ def analyze_swap_results(
         DataFrame with detailed analysis including:
         - Entity--Item: Item identifier
         - Original_Volume, Final_Volume, Volume_Change: Volume metrics
+        - Volume_Swapped_Away: Volume of this item that was swapped to other items
+        - Volume_Swapped_To: Volume of other items that were swapped to this item
         - Original_Cost, Original_Supplier, New_Supplier: Cost and supplier info
         - VGN: Vendor name
-        - All Descriptions: Item descriptions
+        - Combined Descriptions: Item descriptions
         - attributes: Product attributes
         - PL_Flag: Private label flag
         - Action: Description of what happened to the item
         - Savings_From_Swapping_Away: Savings when this item was swapped to another
         - Savings_From_Swapping_To: Savings when other items were swapped to this one
+        
+    Note: Final_Volume = Original_Volume + Volume_Swapped_To - Volume_Swapped_Away
     """
     if optimization_results['status'] != "Optimal":
         print("Cannot analyze results: optimization was not optimal")
@@ -702,6 +706,12 @@ def analyze_swap_results(
         # Calculate savings from swapping to (when other items were swapped to this one)
         savings_from_swapping_to = sum(s['savings'] for s in swaps_to)
         
+        # Calculate volume swapped away (when this item was swapped to another)
+        volume_swapped_away = sum(s['volume_moved'] for s in swaps_from)
+        
+        # Calculate volume swapped to (when other items were swapped to this one)
+        volume_swapped_to = sum(s['volume_moved'] for s in swaps_to)
+        
         # Determine action and new supplier
         if swaps_from:
             # Item was swapped away
@@ -720,20 +730,28 @@ def analyze_swap_results(
 
         # Get additional item details from im_final
         vendor_name = item_data.get(TRANSACTION_COLUMNS['vgn'], 'N/A')
-        all_descriptions = item_data.get('All Descriptions', 'N/A')
+        all_descriptions = item_data.get('Combined Descriptions', 'N/A')
         attributes = item_data.get('attributes', 'N/A')
         pl_flag = item_data.get(TRANSACTION_COLUMNS['vb_flag'], 'N/A')
+        
+        # Verify the volume calculation: Final = Original + Swapped_To - Swapped_Away
+        calculated_final = original_volume + volume_swapped_to - volume_swapped_away
+        if abs(calculated_final - final_volume) > 1e-6:  # Allow for small floating point differences
+            print(f"Warning: Volume calculation mismatch for {item_id}. "
+                  f"Expected: {calculated_final}, Got: {final_volume}")
         
         analysis_data.append({
             'Entity--Item': item_id,
             'Original_Volume': original_volume,
             'Final_Volume': final_volume,
             'Volume_Change': final_volume - original_volume,
+            'Volume_Swapped_Away': volume_swapped_away,
+            'Volume_Swapped_To': volume_swapped_to,
             'Original_Cost': original_cost,
             'Original_Supplier': original_supplier,
             'New_Supplier': new_supplier,
             'VGN': vendor_name,
-            'All Descriptions': all_descriptions,
+            'Combined Descriptions': all_descriptions,
             'attributes': attributes,
             'PL_Flag': pl_flag,
             'Action': action,
