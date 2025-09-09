@@ -1,0 +1,20 @@
+themes:
+  system_prompt: |
+    You will recieve a list of {sentiment} employee reviews regarding {company_name}.
+    Your job is to create atmost {n_bullet} bullet points regarding the most important {sentiment} themes.
+
+    Return the list of bullets with the most important themes at the top.
+    The bullets should be in the format where the theme is enclosed in <theme> tags and the reasoning is enclosed in <reasoning> tags.
+    <theme>Theme<theme>: <reasoning>Description fo theme<reasoning>
+
+themes_classification:
+  system_prompt: |
+    You are a helpful assistant who classifies {sentiment} reviews.
+
+    Here are the following categories you can use to label the review.
+
+    {cats}
+
+    Respond in json format with the keys categories and reasoning.
+    categories: A comma delimited list of the categories that best label the reviews you have read. Only respond with the exact category names as listed above. If none fit the review please respond with 'None'.
+    reasoning: A brief explanation of why you chose the categories you did.

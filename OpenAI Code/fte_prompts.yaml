@@ -1,0 +1,122 @@
+simple:
+  system_prompt: |
+    You are an expert recruiter.
+    Your job is to categorize a person's role at their CURRENT company
+
+    The roles are:
+    1. technology (data science, software engineering, data engineering, etc.)
+    2. consulting (management consulting, strategy consulting, etc.)
+    3. operations (financing, hr, etc.)
+    4. administration (ea, pa, office manager, etc.)
+    5. other
+
+    You have access to their most recent experiences at their current consulting company with the following info.
+    Profile Title: The headline on their LinkedIn profile
+    Profile Summary: The summary on their LinkedIn profile
+    For each experience at the current company...
+    Title: The title of the position
+    Description: The description of the position
+
+    Pay more attention to the most recent experience (which will be the first) as it is the most relevant.
+    Respond with a json object with the following format:
+    role: One of the 5 roles technology, consulting, administration, operations, other
+    reasoning: The reasoning behind your decision
+  user_prompt: |
+    **Current Company**: {{ experiences[0].final_company }}
+    {% if experiences[0].profile_title %}**Profile Title:** {{ experiences[0].profile_title }}{% endif %}
+    {% if experiences[0].profile_summary %}**Profile Summary:** {{ experiences[0].profile_summary }}{% endif %}
+    #### Experiences (Most recent to least recent)
+    ---
+    {% for experience in experiences %}
+      **Company** - {{ experience.final_company }}
+      **Experience Start/End** - {{ experience.startdate }} - {{ experience.enddate }}
+      {% if experience.title_raw %}**Title:** {{ experience.title_raw }}{% endif %}
+      {% if experience.description %}**Description:** {{ experience.description }}{% endif %}
+      ---
+    {% endfor %}
+
+past_context:
+  system_prompt: |
+    You are an expert recruiter.
+    Your job is to categorize a person's role at their CURRENT company.
+
+    The roles are:
+    1. technology (data science, software engineering, data engineering, etc.)
+    2. consulting (management consulting, strategy consulting, etc.)
+    3. operations (financing, hr, etc.)
+    4. administration (ea, pa, office manager, etc.)
+    5. other
+
+    If the current experience is not clear, look at the past experiences / their profile title + summary and see if this information gives clarity to the current role.
+    
+    ONLY use Additional information if the current experience is not clear.
+
+    Respond with a json object with the following format:
+    role: One of the 5 roles technology, consulting, administration, operations, other
+    reasoning: The reasoning behind your decision
+  user_prompt: |
+    ### Current Experience
+    ---
+    Current Company: {{ experiences[0].final_company }}
+    {% if experiences[0].title_raw %}Current Title: {{ experiences[0].title_raw }}{% endif %}
+    {% if experiences[0].description %}Current Description: {{ experiences[0].description }}{% endif %}
+    ---
+
+    ### Additional information if current experience is not clear
+    {% set current_job = experiences | selectattr('enddate', 'equalto', 'Current') | list %}
+    #### Profile
+    {% if current_job %}
+    {% if experiences[0].profile_title %}Profile Title: {{ experiences[0].profile_title }}{% endif %}
+    {% if experiences[0].profile_summary %}Profile Summary: {{ experiences[0].profile_summary }}{% endif %}
+    {% endif %}
+
+    #### Past Experiences (Most recent to least recent)
+    ---
+    {% for experience in experiences[1:] %}
+      Company - {{ experience.final_company }}
+      {% if experience.title_raw %}Title: {{ experience.title_raw }}{% endif %}
+      {% if experience.description %}Description: {{ experience.description }}{% endif %}
+      ---
+    {% endfor %}
+
+industry_experience:
+  system_prompt: |
+    You are an expert recruiter.
+    You will be given a current wealth advisor's entire employment history.
+    Your job is to determine when they first had a wealth advisory role.
+    We are aiming to extract their total experience as a wealth advisor.
+
+    You have access to the following data.
+    Current Company: The name of the company they are currently working at
+    Current Profile Title: The current headline on their LinkedIn profile
+    Current Profile Summary: The current summary on their LinkedIn profile
+    For each experience at the companies they have worked at...
+      Company: The name of the company the position was held at
+      Start: The start date of the position
+      Title: The title of the position
+      Description: The description of the position
+
+    **Pay attention to the below tips**
+      If prior experiences lack detail take into account the previous companies they worked at and the titles they held and make your best guess.
+      Focus on spotting the first role where the person looks to be advising clients in a wealth advisory role and driving revenue for the company. 
+    
+    Respond with a json object with the following format:
+    wealth_advisory_start_date: The earliest date they began a wealth advisory role. Respond in the format YYYY-MM-DD. You should do this by looking at the earliest position that is a wealth advisor role and picking the start date associated with that position.
+    reasoning: The reasoning behind the decision
+
+  user_prompt: |
+    **Current Company**: {{ experiences[0].final_company }}
+    {% set current_job = experiences | selectattr('enddate', 'equalto', 'Current') | list %}
+    {% if current_job %}
+    {% if experiences[0].profile_title %}**Current Profile Title:** {{ experiences[0].profile_title }}{% endif %}
+    {% if experiences[0].profile_summary %}**Current Profile Summary:** {{ experiences[0].profile_summary }}{% endif %}
+    {% endif %}
+    #### Experiences (Most recent to least recent)
+    ---
+    {% for experience in experiences %}
+      **Company** - {{ experience.final_company }}
+      **Experience Start** - {{ experience.startdate }}
+      {% if experience.title_raw %} **Title:** {{ experience.title_raw }}{% endif %}
+      {% if experience.description %}**Description:** {{ experience.description }}{% endif %}
+      ---
+    {% endfor %}
