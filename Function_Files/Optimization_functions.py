@@ -72,6 +72,7 @@ def validate_list_input(value: List, name: str) -> None:
         raise ValidationError(f"{name} must be a non-empty list")
 
 def get_cost_diff_df(im_final, transactions, rebates):
+    # Merge in rebate info
     rebates = rebates.drop_duplicates(subset=[TRANSACTION_COLUMNS['vgn']])
     df_rebate = transactions.merge(
         rebates[[TRANSACTION_COLUMNS['vgn'], 'Imperial Rebate % 2024']],
@@ -80,6 +81,17 @@ def get_cost_diff_df(im_final, transactions, rebates):
     )
     df_rebate.loc[:, 'Imperial Rebate % 2024'] = df_rebate['Imperial Rebate % 2024'].fillna(0)
     df_rebate['po_cost_amt (after rebate) for Non POD'] = df_rebate['po_cost_amt'] * (1 - df_rebate['Imperial Rebate % 2024'])
+
+    # Merge in case pack from im_final (always take from im_final, not transactions)
+    df_rebate = df_rebate.merge(
+        im_final[['Entity--Item', TRANSACTION_COLUMNS['case_pack']]],
+        on='Entity--Item',
+        how='left',
+        suffixes=('', '_from_im_final')
+    )
+    # Overwrite with im_final's case pack
+    df_rebate[TRANSACTION_COLUMNS['case_pack']] = df_rebate[TRANSACTION_COLUMNS['case_pack'] + '_from_im_final']
+    df_rebate = df_rebate.drop(columns=[TRANSACTION_COLUMNS['case_pack'] + '_from_im_final'])
 
     # Ensure 'Case Pack' is numeric before aggregation to avoid TypeError
     df_rebate[TRANSACTION_COLUMNS['case_pack']] = pd.to_numeric(df_rebate[TRANSACTION_COLUMNS['case_pack']], errors='coerce')
@@ -124,6 +136,8 @@ def get_cost_diff_df(im_final, transactions, rebates):
 
             case_pack_i = item_case_pack_dict.get(item_i, np.nan)
             case_pack_ratio_i = case_pack_i/case_pack_j
+            if case_pack_ratio_i <= .1 or case_pack_ratio_i >= 10:
+                case_pack_ratio_i = 1
 
             adj_Non_POD_cost_i = Non_POD_cost_i*case_pack_ratio_i
             adj_POD_cost_i = POD_cost_i*case_pack_ratio_i
@@ -153,10 +167,200 @@ def get_cost_diff_df(im_final, transactions, rebates):
 # DATA PREPARATION FUNCTIONS
 # =============================================================================
 
+def process_sku_groups(
+    im_final: pd.DataFrame,
+    maintain_ids: Optional[List[str]] = None,
+    kill_ids: Optional[List[str]] = None,
+    preferred_ids: Optional[List[str]] = None
+) -> Tuple[pd.DataFrame, List[str], List[str], List[str], List[str]]:
+    """
+    Process and validate SKU groups (maintain, kill, preferred) with precedence order and match validation.
+    
+    This function handles:
+    1. Precedence order resolution (preferred > maintain > kill)
+    2. Preferred SKU match filtering
+    3. Kill SKU validation (removes SKUs with no valid matches)
+    
+    Args:
+        im_final: DataFrame with item data
+        maintain_ids: Optional list of item IDs that cannot have any swaps
+        kill_ids: Optional list of item IDs that must be swapped away
+        preferred_ids: Optional list of preferred item IDs that cannot be swapped away (but can receive swaps)
+        
+    Returns:
+        Tuple of (modified_im_final, processed_maintain_ids, processed_kill_ids, processed_preferred_ids, could_not_kill_ids)
+    """
+    print("--- Processing SKU Groups ---")
+    
+    # Initialize lists if None
+    if maintain_ids is None:
+        maintain_ids = []
+    if kill_ids is None:
+        kill_ids = []
+    if preferred_ids is None:
+        preferred_ids = []
+    
+    # Get unique item IDs for validation
+    item_ids = sorted(im_final['Entity--Item'].dropna().unique().tolist())
+    item_to_idx = {item_id: i for i, item_id in enumerate(item_ids)}
+    
+    # Process preferred SKUs if provided
+    if preferred_ids:
+        print(f"Processing {len(preferred_ids)} preferred SKUs...")
+        
+        # Create a copy to avoid modifying original
+        kill_ids = kill_ids.copy()
+        non_preferred_added_to_kill = 0
+        
+        # Process each row to filter matches and update kill list
+        for idx, row in im_final.iterrows():
+            item_id = row['Entity--Item']
+            matches = row['Matches']
+            
+            if pd.isna(item_id) or item_id not in item_to_idx:
+                continue
+            
+            # Parse matches
+            match_list = []
+            if isinstance(matches, list):
+                match_list = matches
+            elif isinstance(matches, str) and matches.strip().startswith('[') and matches.strip().endswith(']'):
+                try:
+                    parsed = ast.literal_eval(matches)
+                    if isinstance(parsed, list):
+                        match_list = parsed
+                except (ValueError, SyntaxError, TypeError):
+                    pass
+            
+            # Check if any preferred SKUs are in the match list
+            preferred_matches = [match for match in match_list if str(match).strip() in preferred_ids]
+            
+            if preferred_matches:
+                # If this item is not preferred and has preferred matches, force it to kill
+                if item_id not in preferred_ids and item_id not in kill_ids:
+                    kill_ids.append(item_id)
+                    non_preferred_added_to_kill += 1
+                
+                # Filter matches to only include preferred SKUs
+                filtered_matches = [match for match in match_list if str(match).strip() in preferred_ids]
+                
+                # Update the Matches column with filtered matches
+                im_final.at[idx, 'Matches'] = filtered_matches
+        
+        print(f"{non_preferred_added_to_kill} Non-Preferred SKUs have a Preferred SKU Swap and are thus added to the Kill list to be swapped away.")
+    
+    # Handle precedence order: preferred > maintain > kill
+    # If a SKU is in multiple groups, apply the precedence order
+    if preferred_ids or kill_ids or maintain_ids:
+        print("Applying precedence order: preferred > maintain > kill to SKUs on multiple lists")
+        
+        # Create copies to avoid modifying original lists
+        final_preferred = preferred_ids.copy()
+        final_kill = kill_ids.copy()
+        final_maintain = maintain_ids.copy()
+        
+        # Find SKUs that appear in multiple groups
+        all_skus = set(preferred_ids + kill_ids + maintain_ids)
+        conflicts = []
+        
+        for sku in all_skus:
+            groups = []
+            if sku in preferred_ids:
+                groups.append("preferred")
+            if sku in kill_ids:
+                groups.append("kill")
+            if sku in maintain_ids:
+                groups.append("maintain")
+            
+            if len(groups) > 1:
+                conflicts.append((sku, groups))
+        
+        if conflicts:
+            print(f"Found {len(conflicts)} SKUs in multiple groups")
+        
+        # Apply precedence order
+        for sku, groups in conflicts:
+            # Remove from all groups first
+            if sku in final_preferred:
+                final_preferred.remove(sku)
+            if sku in final_kill:
+                final_kill.remove(sku)
+            if sku in final_maintain:
+                final_maintain.remove(sku)
+            
+            # Add to highest precedence group
+            if "preferred" in groups:
+                final_preferred.append(sku)
+            elif "maintain" in groups:
+                final_maintain.append(sku)
+            elif "kill" in groups:
+                final_kill.append(sku)
+        
+        if conflicts:
+            print(f"{len(conflicts)} SKUs adjusted after being on multiple lists")
+        
+        # Update the lists
+        preferred_ids = final_preferred
+        kill_ids = final_kill
+        maintain_ids = final_maintain
+        
+        print(f"Final group sizes after precedence:")
+        print(f"  Preferred: {len(preferred_ids)}")
+        print(f"  Kill: {len(kill_ids)}")
+        print(f"  Maintain: {len(maintain_ids)}")
+    
+    # Remove kill SKUs that have no valid matches (can't be swapped away if no targets)
+    could_not_kill_ids = []
+    if kill_ids:
+        print("Checking kill SKUs for valid matches...")
+        kill_skus_to_remove = []
+        
+        for kill_sku in kill_ids:
+            if kill_sku not in item_to_idx:
+                continue
+                
+            # Find the row for this SKU
+            sku_row = im_final[im_final['Entity--Item'] == kill_sku]
+            if sku_row.empty:
+                continue
+                
+            matches = sku_row['Matches'].iloc[0]
+            
+            # Parse matches
+            match_list = []
+            if isinstance(matches, list):
+                match_list = matches
+            elif isinstance(matches, str) and matches.strip().startswith('[') and matches.strip().endswith(']'):
+                try:
+                    parsed = ast.literal_eval(matches)
+                    if isinstance(parsed, list):
+                        match_list = parsed
+                except (ValueError, SyntaxError, TypeError):
+                    pass
+            
+            # Check if there are any valid matches (excluding the SKU itself)
+            valid_matches = [match for match in match_list if str(match).strip() != kill_sku and str(match).strip() in item_to_idx]
+            
+            if not valid_matches:
+                kill_skus_to_remove.append(kill_sku)
+        
+        # Track SKUs that couldn't be killed
+        could_not_kill_ids = kill_skus_to_remove.copy()
+        
+        # Remove SKUs with no matches from kill list
+        if kill_skus_to_remove:
+            kill_ids = [sku for sku in kill_ids if sku not in kill_skus_to_remove]
+            print(f"Removed {len(kill_skus_to_remove)} SKUs from kill list due to no valid matches")
+            print(f"Final kill list size: {len(kill_ids)}")
+        else:
+            print("All kill SKUs have valid matches")
+    
+    print("--- SKU Group Processing Complete ---")
+    return im_final, maintain_ids, kill_ids, preferred_ids, could_not_kill_ids
+
 def prepare_optimization_data(
     im_final: pd.DataFrame,
-    cost_diff_matrix: pd.DataFrame,
-    must_keep_ids: Optional[List[str]] = None
+    cost_diff_matrix: pd.DataFrame
 ) -> Tuple[pd.DataFrame, pd.DataFrame, List[str], List[str], Dict[str, int], Dict[str, int]]:
     """
     Prepare data for optimization by cleaning and validating inputs.
@@ -164,7 +368,6 @@ def prepare_optimization_data(
     Args:
         im_final: DataFrame with item data
         cost_diff_matrix: DataFrame with cost differences for swaps [i,j] = cost to switch from i to j
-        must_keep_ids: Optional list of item IDs that must retain their volume
         
     Returns:
         Tuple of (cleaned_im_final, cleaned_cost_matrix, item_ids, supplier_ids, item_to_idx, supplier_to_idx)
@@ -217,6 +420,7 @@ def prepare_optimization_data(
     # Ensure diagonal is 0 (no cost to keep same item)
     np.fill_diagonal(cost_matrix_clean.values, 0)
     
+    
     return im_final_clean, cost_matrix_clean, item_ids, supplier_ids, item_to_idx, supplier_to_idx
 
 def create_swap_feasibility_matrix(
@@ -242,7 +446,7 @@ def create_swap_feasibility_matrix(
     np.fill_diagonal(feasibility_matrix, 1)
 
     # Process matches column
-    for _, row in im_final.iterrows():
+    for _, row in im_final.iterrows(): 
         item_id = row['Entity--Item']
         matches = row['Matches']
 
@@ -262,7 +466,7 @@ def create_swap_feasibility_matrix(
                     match_list = parsed
             except (ValueError, SyntaxError, TypeError):
                 pass
-
+            
         # Set feasibility for matches
         for match in match_list:
             match_str = str(match).strip()
@@ -273,85 +477,6 @@ def create_swap_feasibility_matrix(
 
     return feasibility_matrix
 
-def check_basic_feasibility(
-    im_final: pd.DataFrame,
-    cost_diff_matrix: pd.DataFrame,
-    must_keep_ids: Optional[List[str]] = None
-) -> Dict:
-    """
-    Check basic feasibility of the optimization problem before solving.
-    
-    Args:
-        im_final: DataFrame with item data
-        cost_diff_matrix: DataFrame with cost differences for swaps
-        must_keep_ids: Optional list of item IDs that must retain their volume
-        
-    Returns:
-        Dictionary with feasibility check results
-    """
-    print("--- Checking Basic Feasibility ---")
-    
-    # Prepare data
-    im_final_clean, cost_matrix_clean, item_ids, supplier_ids, item_to_idx, supplier_to_idx = prepare_optimization_data(
-        im_final, cost_diff_matrix, must_keep_ids
-    )
-    
-    # Create swap feasibility matrix
-    feasibility_matrix = create_swap_feasibility_matrix(im_final_clean, item_ids, item_to_idx)
-    
-    # Get volumes
-    volumes = {}
-    for item_id in item_ids:
-        item_data = im_final_clean[im_final_clean['Entity--Item'] == item_id]
-        if not item_data.empty:
-            volumes[item_id] = item_data[TRANSACTION_COLUMNS['qty']].iloc[0]
-        else:
-            volumes[item_id] = 0
-    
-    # Check 1: Are there any feasible swaps?
-    feasible_swaps = 0
-    for i in item_ids:
-        for j in item_ids:
-            if i != j and feasibility_matrix[item_to_idx[i], item_to_idx[j]] == 1:
-                feasible_swaps += 1
-    
-    print(f"Total feasible swaps: {feasible_swaps}")
-    
-    # Check 2: Are there any positive cost savings?
-    positive_savings = 0
-    total_savings = 0
-    for i in item_ids:
-        for j in item_ids:
-            if i != j:
-                savings = cost_matrix_clean.loc[i, j]
-                total_savings += savings
-                if savings > 0:
-                    positive_savings += 1
-    
-    print(f"Positive cost savings opportunities: {positive_savings}")
-    print(f"Total potential savings: ${total_savings:,.2f}")
-    
-    # Check 3: Volume constraints
-    zero_volume_items = sum(1 for v in volumes.values() if v < 1e-6)
-    print(f"Items with zero volume: {zero_volume_items}")
-    
-    # Check 4: Must-keep constraints
-    if must_keep_ids:
-        must_keep_in_data = [item_id for item_id in must_keep_ids if item_id in item_ids]
-        print(f"Must-keep items found in data: {len(must_keep_in_data)}/{len(must_keep_ids)}")
-    
-    feasibility_info = {
-        'feasible_swaps': feasible_swaps,
-        'positive_savings': positive_savings,
-        'total_savings': total_savings,
-        'zero_volume_items': zero_volume_items,
-        'total_items': len(item_ids),
-        'total_suppliers': len(supplier_ids)
-    }
-    
-    print(f"Feasibility check complete. Problem appears {'feasible' if feasible_swaps > 0 else 'infeasible'}.")
-    return feasibility_info
-
 # =============================================================================
 # OPTIMIZATION FUNCTIONS
 # =============================================================================
@@ -359,9 +484,11 @@ def check_basic_feasibility(
 def solve_swap_optimization(
     im_final: pd.DataFrame,
     cost_diff_matrix: pd.DataFrame,
-    must_keep_ids: Optional[List[str]] = None,
+    maintain_ids: Optional[List[str]] = None,
+    kill_ids: Optional[List[str]] = None,
+    preferred_ids: Optional[List[str]] = None,
     max_swaps: Optional[int] = None,
-    volume_constraint_factor: float = 2.0,
+    volume_constraint_factor: float = 10000,
     max_suppliers: Optional[int] = None
 ) -> Dict:
     """
@@ -372,7 +499,9 @@ def solve_swap_optimization(
     Args:
         im_final: DataFrame with item data
         cost_diff_matrix: DataFrame with cost differences for swaps
-        must_keep_ids: Optional list of item IDs that must retain their volume
+        maintain_ids: Optional list of item IDs that cannot be swapped away (but can receive swaps)
+        kill_ids: Optional list of item IDs that must be swapped away (cannot retain volume)
+        preferred_ids: Optional list of preferred item IDs that cannot be swapped away (but can receive swaps) that cannot be swapped away (but can receive swaps)
         max_swaps: Optional maximum number of swaps allowed
         volume_constraint_factor: Factor to limit volume redistribution (default 2.0)
         max_suppliers: Optional maximum number of suppliers allowed (None = no cap)
@@ -384,7 +513,7 @@ def solve_swap_optimization(
 
     # Prepare data
     im_final_clean, cost_matrix_clean, item_ids, supplier_ids, item_to_idx, supplier_to_idx = prepare_optimization_data(
-        im_final, cost_diff_matrix, must_keep_ids
+        im_final, cost_diff_matrix
     )
 
     # Create swap feasibility matrix
@@ -444,15 +573,28 @@ def solve_swap_optimization(
     for i in item_ids:
         prob += outgoing_sum(i) <= 1, f"At_Most_One_Outgoing_Swap_{i}"
 
-    # (1b) Cannot give and receive (all-or-nothing): if an item swaps away, it cannot receive
+    # (1b) Cannot give and receive: if an item swaps away, it cannot receive; otherwise incoming is unrestricted
+    big_M_incoming = len(item_ids)
     for i in item_ids:
-        prob += outgoing_sum(i) + incoming_sum(i) <= 1, f"Cannot_Give_And_Receive_{i}"
+        prob += incoming_sum(i) <= big_M_incoming * (1 - outgoing_sum(i)), f"No_Receive_If_Giving_{i}"
 
-    # (2) Must-keep SKUs cannot be swapped away (but can receive)
-    if must_keep_ids:
-        for k in must_keep_ids:
+    # (2a) Maintain SKUs cannot be swapped away (but can receive swaps)
+    if maintain_ids:
+        for k in maintain_ids:
             if k in item_ids:
-                prob += outgoing_sum(k) == 0, f"Must_Keep_No_Outgoing_{k}"
+                prob += outgoing_sum(k) == 0, f"Maintain_No_Outgoing_{k}"
+    
+    # (2b) Preferred SKUs cannot be swapped away (but can receive swaps)
+    if preferred_ids:
+        for k in preferred_ids:
+            if k in item_ids:
+                prob += outgoing_sum(k) == 0, f"Preferred_No_Outgoing_{k}"
+    
+    # (2c) Kill SKUs must be swapped away (cannot retain volume)
+    if kill_ids:
+        for k in kill_ids:
+            if k in item_ids:
+                prob += outgoing_sum(k) == 1, f"Kill_Must_Outgoing_{k}"
 
     # (3) Final volume caps
     cap_by_j = {}
@@ -545,8 +687,10 @@ def solve_swap_optimization(
 def solve_swap_optimization_looped(
     im_final: pd.DataFrame,
     cost_diff_matrix: pd.DataFrame,
-    must_keep_ids: Optional[List[str]] = None,
-    volume_constraint_factor: float = 2.0,
+    maintain_ids: Optional[List[str]] = None,
+    kill_ids: Optional[List[str]] = None,
+    preferred_ids: Optional[List[str]] = None,
+    volume_constraint_factor: float = 10000,
     supplier_step_factor: float = 0.95
 ) -> pd.DataFrame:
     """
@@ -556,7 +700,9 @@ def solve_swap_optimization_looped(
     Args:
         im_final: DataFrame with item data
         cost_diff_matrix: DataFrame with cost differences for swaps
-        must_keep_ids: Optional list of item IDs that must retain their volume
+        maintain_ids: Optional list of item IDs that cannot be swapped away (but can receive swaps)
+        kill_ids: Optional list of item IDs that must be swapped away (cannot retain volume)
+        preferred_ids: Optional list of preferred item IDs that cannot be swapped away (but can receive swaps) that cannot be swapped away (but can receive swaps)
         volume_constraint_factor: Factor to limit volume redistribution
         supplier_step_factor: Factor to reduce supplier limit in each iteration (default 0.95 = 5% reduction)
     
@@ -568,7 +714,7 @@ def solve_swap_optimization_looped(
 
     # Prepare data
     im_final_clean, cost_matrix_clean, item_ids, supplier_ids, item_to_idx, supplier_to_idx = prepare_optimization_data(
-        im_final, cost_diff_matrix, must_keep_ids
+        im_final, cost_diff_matrix
     )
     
     # Create swap feasibility matrix
@@ -607,7 +753,9 @@ def solve_swap_optimization_looped(
         results = solve_swap_optimization(
             im_final=im_final,
             cost_diff_matrix=cost_diff_matrix,
-            must_keep_ids=must_keep_ids,
+            maintain_ids=maintain_ids,
+            kill_ids=kill_ids,
+            preferred_ids=preferred_ids,
             max_suppliers=current_max_allowed_suppliers,
             volume_constraint_factor=volume_constraint_factor
         )
