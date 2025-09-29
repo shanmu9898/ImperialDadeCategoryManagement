@@ -1,6 +1,6 @@
 import pandas as pd
 from typing import List, Tuple, Optional, Dict
-from pyvent.tools.llm.openai_api import OpenAIAgent
+from openai_api import OpenAIAgent
 
 # =============================================================================
 # CONSTANTS AND CONFIGURATION

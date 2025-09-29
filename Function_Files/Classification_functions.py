@@ -1,7 +1,7 @@
 import pandas as pd
 import os
 from typing import List, Tuple, Optional, Dict, Any
-from pyvent.tools.llm.openai_api import OpenAIAgent
+from openai_api import OpenAIAgent
 
 # =============================================================================
 # CONSTANTS AND CONFIGURATION
@@ -400,69 +400,104 @@ def write_excel_file(
     except Exception as e:
         print(f"Error writing DataFrame to Excel file '{filepath}': {e}")
 
+
 def extract_case_pack_with_examples(df, agent, default_pack_size=1000):
-        example_text = """
-        Description: Dome Sip Lid F/10-20Oz Hot Cup Wht 20/50
-        Case Pack: 1000
+    example_text = """
+    Description: Dome Sip Lid F/10-20Oz Hot Cup Wht 20/50
+    Case Pack: 1000
 
-        Description: *Custom* Cp12 - 12Oz American Burger Cup 3 Color Print - 5000/Cs
-        Case Pack: 5000
+    Description: *Custom* Cp12 - 12Oz American Burger Cup 3 Color Print - 5000/Cs
+    Case Pack: 5000
 
-        Description: Pm-Pc3.25Blk - 3.25Oz Black Portion Cup - 20x125/Cs
-        Case Pack: 2500
+    Description: Pm-Pc3.25Blk - 3.25Oz Black Portion Cup - 20x125/Cs
+    Case Pack: 2500
 
-        Description: 64313  Clear Cup Pet Straw Slot Lid For 12-24 98Mm 1000Ca
-        Case Pack: 1000
+    Description: 64313  Clear Cup Pet Straw Slot Lid For 12-24 98Mm 1000Ca
+    Case Pack: 1000
 
-        Description: Kneaders 22Oz Ppr Cold Cup Prnt 1M
-        Case Pack: 1000
+    Description: Kneaders 22Oz Ppr Cold Cup Prnt 1M
+    Case Pack: 1000
 
-        Description: Gp Cp10 Dixie 10Oz Cup 20X50Ca Pete Clear Plastic Cold Cup
-        Case Pack: 1000
-        """
+    Description: Gp Cp10 Dixie 10Oz Cup 20X50Ca Pete Clear Plastic Cold Cup
+    Case Pack: 1000
+    """
 
-        system_prompt = f"""
-        You are to extract the Case Pack quantity from a product description. The Case Pack is the number of items in a case, usually a number like 1000, 500, 250, etc.
+    system_prompt = f"""
+    You are to extract the Case Pack quantity from a product description. The Case Pack is the number of items in a case, usually a number like 1000, 500, 250, etc.
 
-        Here are some examples from the data - but these may not be the only ways case pack may be mentioned in the description:
-        {example_text}
+    Here are some examples from the data - but these may not be the only ways case pack may be mentioned in the description:
+    {example_text}
 
-        Only return the number, no other text. If you cannot find a Case Pack in the description, return 'N/A'.
-        """
+    Only return the number, no other text. If you cannot find a Case Pack in the description, return 'N/A'.
+    """
 
+    user_prompt = (
+        "Given this product description: '{Description with Attributes}' "
+        "extract the Case Pack number from the description. Only return the number, no other text. If you cannot find a Case Pack number in the description, return 'N/A'."
+    )
 
-        user_prompt = (
-                "Given this product description: '{Description with Attributes}' "
-                "extract the Case Pack number frm the description. Only return the number, no other text. If you cannot find a Case Pack number in the description, return 'N/A'."
-        )
+    # Check for duplicate descriptions to optimize processing
+    description_col = 'Description with Attributes'
 
-            # Use the per-row system prompts
+    if description_col in df.columns:
+        # Find unique descriptions
+        unique_descriptions = df[description_col].drop_duplicates()
+
+        if len(unique_descriptions) < len(df):
+            print(
+                f"extract_case_pack_with_examples: Processing {len(unique_descriptions)} unique descriptions instead of {len(df)} total descriptions")
+
+            # Create a subset with unique descriptions
+            unique_df = df.drop_duplicates(subset=[description_col]).copy()
+
+            # Process only unique descriptions
+            unique_df = agent.format_df_prompts(unique_df, system_prompt, user_prompt)
+            unique_df = agent.run_df_prompts(unique_df)
+
+            # Create mapping from description to response
+            desc_to_response = dict(zip(unique_df[description_col], unique_df['openai_response']))
+
+            # Map results back to original dataframe
+            result_df = df.copy()
+            result_df['openai_response'] = result_df[description_col].map(desc_to_response)
+            df = result_df
+        else:
+            # No duplicates, process normally
+            df = agent.format_df_prompts(df, system_prompt, user_prompt)
+            df = agent.run_df_prompts(df)
+    else:
+        # Fallback if column not found
         df = agent.format_df_prompts(df, system_prompt, user_prompt)
         df = agent.run_df_prompts(df)
 
-        # Go through the rows where 'openai_response' is 'N/A' and set it to the value in the 'Case Pack' field (if it exists)
-        case_pack_col = PipelineConfig.TRANSACTION_COLUMNS['case_pack']
-        if case_pack_col in df.columns:
-            # If openai_response is 'N/A' and Case Pack exists, use Case Pack value, removing non-numeric characters
-            def clean_case_pack(row):
-                if str(row['openai_response']).strip() == 'N/A' and pd.notnull(row.get(case_pack_col)):
-                    # Remove all non-numeric characters from Case Pack
-                    cleaned = ''.join(filter(str.isdigit, str(row[case_pack_col])))
-                    return cleaned if cleaned else row['openai_response']
-                else:
-                    return row['openai_response']
-            df['openai_response'] = df.apply(clean_case_pack, axis=1)
+    # Go through the rows where 'openai_response' is 'N/A' and set it to the value in the 'Case Pack' field (if it exists)
+    case_pack_col = PipelineConfig.TRANSACTION_COLUMNS['case_pack']
+    if case_pack_col in df.columns:
+        # If openai_response is 'N/A' and Case Pack exists, use Case Pack value, removing non-numeric characters
+        def clean_case_pack(row):
+            if str(row['openai_response']).strip() == 'N/A' and pd.notnull(row.get(case_pack_col)):
+                # Remove all non-numeric characters from Case Pack
+                cleaned = ''.join(filter(str.isdigit, str(row[case_pack_col])))
+                return cleaned if cleaned else row['openai_response']
+            else:
+                return row['openai_response']
 
-        df = df.drop(columns=[case_pack_col], errors='ignore')
-        df = df.rename(columns={'openai_response': case_pack_col})
-        df = df.drop(columns=['system_prompt', 'user_prompt'], errors='ignore')
-        df[case_pack_col] = df[case_pack_col].replace('N/A', pd.NA)
-        df[case_pack_col] = df[case_pack_col].fillna(default_pack_size)
+        df['openai_response'] = df.apply(clean_case_pack, axis=1)
 
-        return df
+    df = df.drop(columns=[case_pack_col], errors='ignore')
+    df = df.rename(columns={'openai_response': case_pack_col})
+    df = df.drop(columns=['system_prompt', 'user_prompt'], errors='ignore')
+    df[case_pack_col] = df[case_pack_col].replace('N/A', pd.NA)
+    df[case_pack_col] = df[case_pack_col].fillna(default_pack_size)
+
+    return df
 
 
-def attribute_with_ai(im_final, agent, columns_for_description2, prompt_options_string, example_desc, example_output, default_pack_size=1000):
+def attribute_with_ai_optimized(im_final, agent, columns_for_description2, prompt_options_string, example_desc,
+                                example_output, default_pack_size=1000):
+    """
+    Optimized version that handles duplicate descriptions before AI processing
+    """
     ps = False
     columns_for_description = columns_for_description2.copy()
     case_pack_col = PipelineConfig.TRANSACTION_COLUMNS['case_pack']
@@ -488,15 +523,48 @@ def attribute_with_ai(im_final, agent, columns_for_description2, prompt_options_
     """
     user_prompt = "Pull out the relevant information based on this product description '{Description with Attributes}'"
 
-    im_final = agent.format_df_prompts(im_final, system_prompt, user_prompt)
-    im_final = agent.run_df_prompts(im_final)
-    im_final = im_final.rename(columns={'openai_response': 'attributes'})
-    
+    # Check for duplicate descriptions before processing
+    description_col = 'Description with Attributes'  # Adjust to your actual column name
+
+    if description_col in im_final.columns:
+        # Find unique descriptions
+        unique_descriptions = im_final[description_col].drop_duplicates()
+
+        if len(unique_descriptions) < len(im_final):
+            print(
+                f"Found {len(im_final) - len(unique_descriptions)} duplicate descriptions. Processing {len(unique_descriptions)} unique descriptions.")
+
+            # Create a subset with unique descriptions
+            unique_df = im_final.drop_duplicates(subset=[description_col])
+
+            # Process only unique descriptions
+            unique_df = agent.format_df_prompts(unique_df, system_prompt, user_prompt)
+            unique_df = agent.run_df_prompts(unique_df)
+            unique_df = unique_df.rename(columns={'openai_response': 'attributes'})
+
+            # Create mapping from description to attributes
+            desc_to_attrs = dict(zip(unique_df[description_col], unique_df['attributes']))
+
+            # Map results back to original dataframe
+            result_df = im_final.copy()
+            result_df['attributes'] = result_df[description_col].map(desc_to_attrs)
+            df = result_df
+        else:
+            # No duplicates, process normally
+            im_final = agent.format_df_prompts(im_final, system_prompt, user_prompt)
+            im_final = agent.run_df_prompts(im_final)
+            df = im_final.rename(columns={'openai_response': 'attributes'})
+    else:
+        # Fallback to original behavior
+        print(f"Warning: Column '{description_col}' not found. Processing all records.")
+        im_final = agent.format_df_prompts(im_final, system_prompt, user_prompt)
+        im_final = agent.run_df_prompts(im_final)
+        df = im_final.rename(columns={'openai_response': 'attributes'})
+
     if ps:
-        df = extract_case_pack_with_examples(im_final, agent, default_pack_size)
+        df = extract_case_pack_with_examples(df, agent, default_pack_size)
 
     return df
-
 
 # =============================================================================
 # MAIN ATTRIBUTE EXTRACTION FUNCTION

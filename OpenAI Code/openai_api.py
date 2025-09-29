@@ -9,7 +9,7 @@ import time
 import datetime
 from tqdm import tqdm
 import pandas as pd
-from pyvent.tools.save_tools import SaveTool
+from pyvent import SaveTool
 import asyncio
 import concurrent.futures
 
@@ -23,7 +23,7 @@ from tenacity import (
     wait_random_exponential,
 )  # for exponential backoff
 
-from pyvent.constants import (
+from pyvent import (
     AZURE_OPENAI_ENDPOINT,
     AZURE_OPENAI_KEY,
     AZURE_BATCH_OPENAI_KEY,
@@ -57,6 +57,7 @@ MAX_TOKEN_DICT = {"text-embedding-3-large": 8191}
 MODEL_PRICING = {
     "gpt-4o": {"prompt": 2.5 / 1000000, "completion": 10 / 1000000},
     "gpt-4o-mini": {"prompt": 0.15 / 1000000, "completion": 0.6 / 1000000},
+    "gpt-4o-mini-2": {"prompt": 0.15 / 1000000, "completion": 0.6 / 1000000},
     "gpt-4o-mini-batch": {
         "prompt": 0.15 / 1000000 / 2,
         "completion": 0.6 / 1000000 / 2,
@@ -388,7 +389,7 @@ class OpenAIAgent(OpenAIAPI):
         super().__init__(model, chunk_size, saver)
 
     def generate_prompts(self, system_prompts: Union[str, List], user_prompts: Union[str, List]):
-            
+
         def input_validation(input: Union[str, List]):
             if isinstance(input, str):
                 return
@@ -400,10 +401,33 @@ class OpenAIAgent(OpenAIAPI):
         input_validation(system_prompts)
         input_validation(user_prompts)
 
-        # verify user_prompts is list of strings
-        if isinstance(user_prompts, list) and isinstance(user_prompts[0], str) and (len(user_prompts) != len(set(user_prompts))):
-            print(f"Warning: User prompts are not unique. Length: {len(user_prompts)} != Unique Length: {len(set(user_prompts))}")
-            print('Consider submitting unique prompts to the API to save on costs and time')
+        # Store original order and create unique prompts mapping
+        original_user_prompts = user_prompts
+        duplicate_mapping = None
+
+        # Check for duplicates and create mapping if needed
+        if isinstance(user_prompts, list) and len(user_prompts) > 0 and isinstance(user_prompts[0], str):
+            unique_prompts = list(set(user_prompts))
+            if len(user_prompts) != len(unique_prompts):
+                print(
+                    f"Info: Found {len(user_prompts) - len(unique_prompts)} duplicate prompts. Processing {len(unique_prompts)} unique prompts to optimize performance.")
+
+                # Create mapping from original indices to unique prompt indices
+                unique_to_indices = {}
+                for i, prompt in enumerate(user_prompts):
+                    if prompt not in unique_to_indices:
+                        unique_to_indices[prompt] = []
+                    unique_to_indices[prompt].append(i)
+
+                # Store mapping for later use
+                duplicate_mapping = {
+                    'original_prompts': user_prompts,
+                    'unique_prompts': unique_prompts,
+                    'mapping': unique_to_indices
+                }
+
+                # Use unique prompts for processing
+                user_prompts = unique_prompts
 
         if isinstance(system_prompts, str) and isinstance(user_prompts, str):
             system_prompts = [{"role": "system", "content": system_prompts}]
@@ -422,8 +446,9 @@ class OpenAIAgent(OpenAIAPI):
             )
 
         prompts = [[system_prompt, user_prompt] for system_prompt, user_prompt in zip(system_prompts, user_prompts)]
-        return prompts
 
+        # Always return prompts and mapping (even if mapping is None)
+        return prompts, duplicate_mapping
     def get_responses(self, prompts, batch=False, **model_kwargs):
         if batch:
             return self.run_batches(prompts, **model_kwargs)
@@ -444,20 +469,34 @@ class OpenAIAgent(OpenAIAPI):
         return df_results
 
     def run_df_prompts(
-        self,
-        df: pd.DataFrame,
-        system_col="system_prompt",
-        user_col="user_prompt",
-        output_col="openai_response",
-        batch=False,
-        **model_kwargs,
+            self,
+            df: pd.DataFrame,
+            system_col="system_prompt",
+            user_col="user_prompt",
+            output_col="openai_response",
+            batch=False,
+            **model_kwargs,
     ):
         df_results = df.copy()
         system_prompts = df_results[system_col].tolist()
         user_prompts = df_results[user_col].tolist()
-        prompts = self.generate_prompts(system_prompts, user_prompts)
+        prompts, mapping = self.generate_prompts(system_prompts, user_prompts)
         responses = self.get_responses(prompts, batch, **model_kwargs)
-        df_results[output_col] = responses
+
+        # If there was deduplication, expand responses back to original length
+        if mapping is not None:
+            expanded_responses = []
+            # Create a mapping from unique prompt to response
+            unique_responses = dict(zip(mapping['unique_prompts'], responses))
+
+            # Map back to original order
+            for original_prompt in mapping['original_prompts']:
+                expanded_responses.append(unique_responses[original_prompt])
+
+            df_results[output_col] = expanded_responses
+        else:
+            df_results[output_col] = responses
+
         return df_results
 
     def _encode_image(self, image_path):

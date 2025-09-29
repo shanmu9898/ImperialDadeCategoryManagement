@@ -7,7 +7,7 @@ import faiss
 import Levenshtein
 import re
 from typing import List, Tuple, Optional, Dict, Any
-from pyvent.tools.llm.openai_api import OpenAIAgent
+from openai_api import OpenAIAgent
 from tqdm import tqdm
 from sklearn.metrics.pairwise import cosine_similarity
 from jinja2 import Template
@@ -848,22 +848,23 @@ If an item doesn't seem like it is swappable you can return None.
 
     return user_prompts, num_to_entity
 
+
 def generate_matches(
-    im_final_full: pd.DataFrame,
-    user_prompts: List[str],
-    numerical_id_to_entity_id_map: Dict[int, str],
-    hard_rules: Optional[str] = None,
-    batch_model: bool = True,
-    chunk_size: int = 32,
-    incorrect_value: str = 'Not Applicable'
+        im_final_full: pd.DataFrame,
+        user_prompts: List[str],
+        numerical_id_to_entity_id_map: Dict[int, str],
+        hard_rules: Optional[str] = None,
+        batch_model: bool = True,
+        chunk_size: int = 32,
+        incorrect_value: str = 'Not Applicable'
 ) -> pd.DataFrame:
     """
     Generate item-to-item matches by querying an AI model with structured prompts.
-    
+
     This function sends formatted prompts to an AI model in batches, enforces strict JSON
     response format, parses responses, maps numerical IDs back to original identifiers,
     and populates the 'Matches' and 'reasoning' columns in the input DataFrame.
-    
+
     Args:
         im_final_full: DataFrame of items to be updated with AI-generated matches
         user_prompts: List of formatted text prompts for AI evaluation
@@ -872,10 +873,10 @@ def generate_matches(
         batch_model: Whether to use batch processing model
         chunk_size: Number of prompts to send in single batch
         incorrect_value: String value to clean from final matches list
-        
+
     Returns:
         DataFrame updated with 'Matches' and 'reasoning' columns from AI responses
-        
+
     Raises:
         ValidationError: If input validation fails
     """
@@ -883,48 +884,56 @@ def generate_matches(
     validate_dataframe(im_final_full, "im_final_full")
     validate_list_input(user_prompts, "user_prompts")
     validate_string_input(incorrect_value, "incorrect_value")
-    
+
     if not numerical_id_to_entity_id_map:
         raise ValidationError("numerical_id_to_entity_id_map cannot be empty")
-    
-    # Create JSON schema for response validation
-    response_schema = _create_response_schema()
-    
+
     # Configure model parameters
     model_kwargs = {
         'temperature': 0.0,
-        'response_format': {
-            "type": "json_schema",
-            "json_schema": {
-                "name": "item_swap_evaluation",
-                "description": "Schema for evaluating item swaps with numerical IDs",
-                "schema": response_schema
-            }
-        }
+        'response_format': {"type": "json_object"}
     }
-    
+
     # Initialize AI agent
-    model = 'gpt-4o-batch' if batch_model else 'gpt-4o'
+    model = 'gpt-4o' if not batch_model else 'gpt-4o-batch'
+    print(f"Initializing OpenAI agent with model: {model}")
     agent = OpenAIAgent(model=model, chunk_size=chunk_size)
-    
+
     # Generate system prompt
     system_prompt = _create_system_prompt(hard_rules)
-    
-    # Get AI responses
-    prompts = agent.generate_prompts(system_prompt, user_prompts)
-    responses = agent.get_responses(prompts, **model_kwargs, batch=batch_model)
-    
+
+    # Get prompts and duplicate mapping
+    prompts, duplicate_mapping = agent.generate_prompts(system_prompt, user_prompts)
+
+    print(f"Getting responses from API (batch={batch_model})...")
+    responses = agent.get_responses(prompts, batch=batch_model, **model_kwargs)
+    print(f"Received {len(responses)} responses")
+
+    # ADDED: Expand responses back to original length if there were duplicates
+    if duplicate_mapping is not None:
+        print(f"Expanding {len(responses)} unique responses back to {len(user_prompts)} total responses")
+        expanded_responses = []
+        # Create a mapping from unique prompt to response
+        unique_responses = dict(zip(duplicate_mapping['unique_prompts'], responses))
+
+        # Map back to original order
+        for original_prompt in duplicate_mapping['original_prompts']:
+            expanded_responses.append(unique_responses[original_prompt])
+
+        responses = expanded_responses
+        print(f"Expanded to {len(responses)} responses")
+
     # Initialize result columns
     _initialize_result_columns(im_final_full)
-    
+
     # Process responses
     _process_ai_responses(responses, im_final_full, numerical_id_to_entity_id_map, incorrect_value)
-    
+
     # Clean final matches
     im_final_full['Matches'] = im_final_full['Matches'].apply(
         lambda x: _clean_matches(x, incorrect_value)
     )
-    
+
     print("Finished processing matches.")
     return im_final_full
 
@@ -1004,25 +1013,40 @@ def _clean_matches(match_list: List[str], incorrect_value: str) -> List[str]:
 
 
 def _process_ai_responses(
-    responses: List[str],
-    df: pd.DataFrame,
-    id_mapping: Dict[int, str],
-    incorrect_value: str
+        responses: List[str],
+        df: pd.DataFrame,
+        id_mapping: Dict[int, str],
+        incorrect_value: str
 ) -> None:
     """Process AI responses and update DataFrame with matches and reasoning."""
     for i, json_str in enumerate(responses):
         if json_str is None:
             print(f"Warning: No AI response received for prompt index {i}. Skipping.")
+            df.at[i, 'Matches'] = []
+            df.at[i, 'reasoning'] = "No response received"
             continue
-            
+
+        # Check if response is an error object
+        if not isinstance(json_str, str):
+            print(f"Error: Response {i} is not a string. Type: {type(json_str).__name__}")
+            df.at[i, 'Matches'] = []
+            df.at[i, 'reasoning'] = f"Error: Invalid response type {type(json_str).__name__}"
+            continue
+
         try:
             data = json.loads(json_str)
             _process_single_response(data, df, id_mapping, i)
-            
+
         except json.JSONDecodeError as e:
             print(f"Error decoding JSON response {i}: {e}")
+            print(f"Response preview: {json_str[:200]}...")
+            df.at[i, 'Matches'] = []
+            df.at[i, 'reasoning'] = f"JSON decode error: {str(e)}"
         except Exception as e:
             print(f"Unexpected error processing response {i}: {e}")
+            print(f"Response type: {type(json_str)}")
+            df.at[i, 'Matches'] = []
+            df.at[i, 'reasoning'] = f"Processing error: {str(e)}"
 
 
 def _process_single_response(
