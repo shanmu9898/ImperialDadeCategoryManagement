@@ -2,7 +2,7 @@ import pandas as pd
 import os
 import re
 from typing import List, Tuple, Optional, Dict, Any
-from pyvent.tools.llm.openai_api import OpenAIAgent
+from openai_api import OpenAIAgent
 from tqdm import tqdm
 from sklearn.metrics.pairwise import cosine_similarity
 from jinja2 import Template

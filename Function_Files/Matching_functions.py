@@ -908,6 +908,7 @@ def generate_matches(
     print(f"Getting responses from API (batch={batch_model})...")
     responses = agent.get_responses(prompts, batch=batch_model, **model_kwargs)
     print(f"Received {len(responses)} responses")
+    print(f'Responses: {responses[0:3]}')
 
     # ADDED: Expand responses back to original length if there were duplicates
     if duplicate_mapping is not None:
@@ -1079,28 +1080,38 @@ def _process_single_response(
 
 
 def _process_matches_list(
-    numerical_matches_list: List,
-    id_mapping: Dict[int, str],
-    response_index: int
+        numerical_matches_list: List,
+        id_mapping: Dict[int, str],
+        response_index: int
 ) -> List[str]:
     """Process numerical matches list and convert to string Entity IDs."""
     string_matches_list = []
-    
+
     if not isinstance(numerical_matches_list, list):
         print(f"Warning: 'Matches' field in response {response_index} is not a list. Defaulting to empty.")
         return string_matches_list
-    
+
     for num_id in numerical_matches_list:
+        # Try to convert to integer if it's a string
+        if isinstance(num_id, str):
+            try:
+                num_id = int(num_id)
+            except (ValueError, TypeError):
+                print(
+                    f"Warning: Cannot convert match ID '{num_id}' to integer in response {response_index}. Skipping match.")
+                continue
+
         if not isinstance(num_id, int):
-            print(f"Warning: Non-integer match ID '{num_id}' in response {response_index}. Skipping match.")
+            print(
+                f"Warning: Non-integer match ID '{num_id}' (type: {type(num_id)}) in response {response_index}. Skipping match.")
             continue
-            
+
         mapped_str = id_mapping.get(num_id)
         if mapped_str:
             string_matches_list.append(mapped_str)
         else:
             print(f"Warning: Numerical match ID {num_id} not found in mapping. Skipping match.")
-    
+
     return string_matches_list
 
 

@@ -571,35 +571,35 @@ def attribute_with_ai_optimized(im_final, agent, columns_for_description2, promp
 # =============================================================================
 
 def extract_attributes_to_dataframe(
-    df: pd.DataFrame, 
-    columns_for_description2: List[str], 
-    item_id_col: str = 'Entity--Item',
-    description_col: str = "Description with Attributes",
-    vendor_col: str = PipelineConfig.TRANSACTION_COLUMNS['vgn'],
-    attribute_col: str = 'attributes',
-    output_excel_filepath: Optional[str] = None
-) -> Tuple[pd.DataFrame, pd.DataFrame]: 
+        df: pd.DataFrame,
+        columns_for_description2: List[str],
+        item_id_col: str = 'Entity--Item',
+        description_col: str = "Description with Attributes",
+        vendor_col: str = PipelineConfig.TRANSACTION_COLUMNS['vgn'],
+        attribute_col: str = 'attributes',
+        output_excel_filepath: Optional[str] = None
+) -> Tuple[pd.DataFrame, pd.DataFrame]:
     """
     Convert OpenAI pipe-delimited attribute strings into structured DataFrame columns.
-    
+
     Args:
         df: DataFrame with item data and AI response strings
-        columns_for_description: List of attribute names to extract
+        columns_for_description2: List of attribute names to extract
         item_id_col: Column name for unique item identifiers
         description_col: Column name for item descriptions
         vendor_col: Column name for vendor names
         attribute_col: Column containing OpenAI pipe-delimited strings
         output_excel_filepath: Optional path to save Excel file
-    
+
     Returns:
-        Tuple of (extracted_df, merged_df) where extracted_df has structured attributes
-        and merged_df is original DataFrame with extracted columns
+        Tuple of (merged_df, output_df) where merged_df is original DataFrame with
+        extracted columns and output_df has structured attributes
     """
     # Input validation
     try:
         validate_dataframe(df, "DataFrame")
         validate_list_input(columns_for_description2, "columns_for_description")
-        
+
         required_cols = [item_id_col, description_col, vendor_col, attribute_col]
         validate_columns_exist(df, required_cols, "DataFrame")
     except ValidationError as e:
@@ -607,24 +607,82 @@ def extract_attributes_to_dataframe(
         empty_df = pd.DataFrame(columns=[item_id_col, description_col, vendor_col] + columns_for_description2)
         return empty_df, pd.DataFrame()
 
+    # Helper function to check if value is an error
+    def is_error_value(value):
+        """Check if value is an error object or error string"""
+        if pd.isna(value):
+            return False
+        if isinstance(value, Exception):
+            return True
+        if not isinstance(value, (str, int, float, bool)):
+            return True
+        if isinstance(value, str):
+            error_keywords = ['BadRequestError', 'API Error', 'Error code:', 'invalid_request_error']
+            return any(keyword in value for keyword in error_keywords)
+        return False
+
+    # Clean error values in attribute_col
+    print(f"Checking for errors in {attribute_col} column...")
+    error_mask = df[attribute_col].apply(is_error_value)
+    error_count = error_mask.sum()
+
+    if error_count > 0:
+        print(f"Warning: Found {error_count} rows with errors in {attribute_col} column")
+        print(f"Error rows will have empty attribute values")
+        # Replace error values with empty string
+        df.loc[error_mask, attribute_col] = ''
+
     # Process data
     processed_data = []
     print(f"Processing {len(df)} rows from the input DataFrame...")
 
     columns_for_description = columns_for_description2.copy()
     case_pack_col = PipelineConfig.TRANSACTION_COLUMNS['case_pack']
+
     if 'Pack Size' in columns_for_description:
         columns_for_description.remove('Pack Size')
         columns_for_description.append(case_pack_col)
-        # add | Case Pack to attributes 
-        df[attribute_col] = df[attribute_col] + ' | Case Pack: ' + df[case_pack_col].astype(str)
 
-    
+        # Safe concatenation function that handles errors
+        def safe_concat_case_pack(row):
+            attr_val = row[attribute_col]
+            case_pack_val = row[case_pack_col]
+
+            # Check if case_pack has error
+            if is_error_value(case_pack_val):
+                case_pack_val = ''
+
+            # Check if attr_val is error or not a string
+            if is_error_value(attr_val) or not isinstance(attr_val, str):
+                if pd.notna(case_pack_val) and str(case_pack_val).strip():
+                    return f'Case Pack: {case_pack_val}'
+                return ''
+
+            # Check if attribute is empty
+            if pd.isna(attr_val) or attr_val.strip() == '':
+                if pd.notna(case_pack_val) and str(case_pack_val).strip():
+                    return f'Case Pack: {case_pack_val}'
+                return ''
+
+            # Normal case: both values are valid
+            if pd.notna(case_pack_val) and str(case_pack_val).strip():
+                return f'{attr_val} | Case Pack: {case_pack_val}'
+            return attr_val
+
+        print("Adding Case Pack to attributes...")
+        df[attribute_col] = df.apply(safe_concat_case_pack, axis=1)
+
+    # Process each row
     for index, row in df.iterrows():
         entity_id = row[item_id_col]
         desc_val = row.get(description_col, '')
         vendor_val = row.get(vendor_col, '')
         response_string = row[attribute_col]
+
+        # Check if response_string is an error
+        if is_error_value(response_string):
+            print(f"Warning: Row {index} ({entity_id}) has error in attributes, using empty values")
+            response_string = ''
 
         parsed_attributes = parse_openai_response(response_string)
         new_row_data = {
@@ -632,41 +690,45 @@ def extract_attributes_to_dataframe(
             description_col: desc_val,
             vendor_col: vendor_val
         }
-        
+
         for attribute_name in columns_for_description:
-            new_row_data[attribute_name] = parsed_attributes.get(attribute_name, None) 
-        
+            new_row_data[attribute_name] = parsed_attributes.get(attribute_name, None)
+
         processed_data.append(new_row_data)
 
     output_df = pd.DataFrame(processed_data)
-    
+
     # Ensure all specified columns_for_description are present
     for attribute_name in columns_for_description:
         if attribute_name not in output_df.columns:
             output_df[attribute_name] = None
-            
+
     # Define final column order
     final_columns_order = [item_id_col, description_col, vendor_col]
     final_columns_order.extend([
-        col for col in columns_for_description 
+        col for col in columns_for_description
         if col in output_df.columns and col not in [item_id_col, description_col, vendor_col]
     ])
-    
+
     if not output_df.empty and final_columns_order:
         existing_final_columns = [col for col in final_columns_order if col in output_df.columns]
         output_df = output_df[existing_final_columns]
-    elif output_df.empty: 
+    elif output_df.empty:
         output_df = pd.DataFrame(columns=final_columns_order if final_columns_order else [item_id_col])
 
     print(f"Successfully created DataFrame with {len(output_df)} rows and {len(output_df.columns)} columns.")
 
+    # Report on rows with errors
+    if error_count > 0:
+        print(f"\nSummary: {error_count} rows had errors and were filled with empty attribute values")
+
     # Write to Excel if filepath is provided
     if output_excel_filepath:
         write_excel_file(output_df, output_excel_filepath, item_id_col, description_col, vendor_col)
-            
+
     # Clean and merge data
     df_cleaned = df.drop(columns=[col for col in columns_for_description if col in df.columns])
-    
+
     # Merge extracted columns back into df_cleaned
     merged_df = pd.merge(
         df_cleaned,
@@ -674,9 +736,8 @@ def extract_attributes_to_dataframe(
         on=item_id_col,
         how='left'
     )
-    
-    return merged_df, output_df
 
+    return merged_df, output_df
 # =============================================================================
 # COVERAGE ANALYSIS FUNCTIONS
 # =============================================================================
