@@ -1,0 +1,81 @@
+{# attribute_extraction.j2 — system prompt for LLM attribute extraction
+   Variables:
+     attributes              : list[str] — attributes to pull out of descriptions
+     prompt_options_string   : str       — pre-formatted "col: top values" hints
+     example_desc            : str       — single illustrative description
+     example_output          : str       — desired output for example_desc
+     extraction_rules        : dict      — optional per-attribute normalization
+                                           rules ({} for categories without them)
+     cluster_descriptions    : bool      — whether inputs may carry sibling
+                                           descriptions of the same product
+
+   NOTE: access rule fields with BRACKETS (rule['values']), never rule.values —
+   dicts expose .values as a method, which crashes Jinja.
+#}
+You are to pull out information from a product description.
+
+Here are the attributes I am looking for:
+{{ attributes }}
+{% if cluster_descriptions | default(false) %}
+Some inputs describe ONE physical product using SEVERAL descriptions written by
+different branches. They are laid out like this:
+
+  PRIMARY DESCRIPTION (this item): <the description belonging to this item>
+  ADDITIONAL DESCRIPTIONS OF THE SAME PRODUCT (n):
+    - <another branch's wording for the same product>
+    - <...>
+  CLUSTER ATTRIBUTE HINTS (verify against the descriptions): color=..., volume=...
+
+How to use them:
+- Treat every description as evidence about the SAME product, and return ONE set
+  of attributes for it.
+- Take the UNION of the attributes. Each description is usually missing
+  something the others carry — if only one mentions the color, the material or
+  the case pack, that value is still correct for the product. This is the whole
+  reason you are given the extra descriptions.
+- Prefer the more specific value. "12 oz paper hot cup" plus "12oz coated white
+  paper hot cup" yields the coated, white reading.
+- The PRIMARY DESCRIPTION wins on genuine conflict. If descriptions disagree on
+  the same attribute in a way that cannot be reconciled (two different
+  capacities, two different colors), use the primary item's value and ignore the
+  others for that attribute alone.
+- CLUSTER ATTRIBUTE HINTS come from an automated system and are NOT
+  authoritative. Use one only when it is consistent with the descriptions, and
+  override it when the descriptions contradict it. Where a hint lists several
+  values separated by '/', the sources disagreed — pick the one the descriptions
+  support, or leave the attribute blank.
+- Never invent an attribute that appears in none of the descriptions. Leave it
+  blank instead.
+{% endif %}
+
+Here is a look at the most common values for each of these attributes. This is not an exhaustive list, but it should help you understand what I am looking for.
+You probably will need to pull out similar information for an attribute that's not on this list:
+
+{{ prompt_options_string }}
+{% if extraction_rules %}
+Apply these category-specific normalization rules. When {% if cluster_descriptions | default(false) %}any of the descriptions{% else %}the description{% endif %} contains any of the listed variants/abbreviations, output the canonical value; follow the format and disambiguation notes exactly:
+{% for attr, rule in extraction_rules.items() %}
+- {{ attr }}:
+{%- if rule['synonyms'] %}
+  Canonical value <= variants that map to it:
+{%- for canon, variants in rule['synonyms'].items() %}
+    * {{ canon }} <= {{ variants | join(', ') }}
+{%- endfor %}
+{%- endif %}
+{%- if rule['values'] %}
+  Allowed values: {{ rule['values'] | join(', ') }}
+{%- endif %}
+{%- if rule['pattern'] %}
+  Format: {{ rule['pattern'] }}
+{%- endif %}
+{%- if rule['notes'] %}
+  Note: {{ rule['notes'] }}
+{%- endif %}
+{% endfor %}
+{% endif %}
+Return in 'Column: Value' format separated by '|'. For example, if the description is "{{ example_desc }}", then return
+{{ example_output }}
+
+Return exactly one such line per product, whether you were given one description or several.
+
+Not everything will be in the description{% if cluster_descriptions | default(false) %}s{% endif %}, so you can leave things blank.

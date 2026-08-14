@@ -1,11 +1,52 @@
-# Ignore all files in Data/ folder
+# Data — all input/output kept out of the repo
 Data/
+data/
+*.csv
+!tests/**/*.csv
+*.xlsx
+!tests/**/*.xlsx
+# Allow YAML configs (categories/, etc.)
+!**/categories/*.yaml
 
-# Ignore system/editor files
+# Secrets
+.env
+.env.*
+!.env.example
+
+# System / editor files
 .DS_Store
 Thumbs.db
 Process_Overview.pptx
+.idea/
+.vscode/
 
-# Ignore Python cache
+# Python
 __pycache__/
 *.pyc
+*.pyo
+.pytest_cache/
+# Match any venv name, not just `.venv` — this repo's is `.venv312`, which the
+# bare `.venv/` pattern missed (32k files / 1 GB, including the ODBC driver
+# DLLs that mssql-python vendors into site-packages).
+.venv*/
+venv/
+build/
+dist/
+*.egg-info/
+
+# Notebook checkpoints
+.ipynb_checkpoints/
+
+# Papermill output runs
+notebooks/runs/
+
+# Local smoke-run cache (parquet snapshots of Fornax / Fabric pulls)
+_smoke_cache/
+_tmp_*.py
+
+# Per-user Claude Code settings. The shared `.claude/settings.json` may be
+# committed; `settings.local.json` is personal and must not be.
+.claude/settings.local.json
+
+# Leftover debug artifact from the Stage 1 column investigation.
+columns_dump.txt

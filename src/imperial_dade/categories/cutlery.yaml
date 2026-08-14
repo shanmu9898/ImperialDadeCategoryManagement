@@ -1,0 +1,36 @@
+name: Cutlery
+data_dir: Cutlery
+sales_file: "Cutlery Sales Data for Cost Analysis L6M Feb - July 25.xlsx"
+
+matching:
+  critical_attributes:
+    - Foodservice Tableware Product Type
+    - Material
+    - Color
+    - Length (IN)
+  directional_attributes:
+    - Straw & Drink Stirrer Product Type
+    - Product Attributes
+    - Pack Size
+    - Sustainable Products
+  exclusion_rules: []
+  vendor_hierarchies: {}
+  vb_brand_name: Victoria Bay
+  top_n: 20
+
+taxonomy:
+  # Unset -> coverage threshold (15%) auto-discovers Salsify columns at runtime.
+  # Validate this list against an actual Cutlery run and pin it here once
+  # known-good, the same way Cups is pinned.
+  columns_for_description: null
+  coverage_threshold: 15.0
+  default_pack_size: 1000
+
+feedback:
+  accept_label: "Accept"
+  reject_label: "Reject"
+  use_subcategory_rules: false
+
+optimization:
+  max_suppliers: 180
+  extra_vendor_exclusions: []

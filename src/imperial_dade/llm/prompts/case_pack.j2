@@ -1,0 +1,10 @@
+{# case_pack.j2 — system prompt for case-pack quantity extraction
+   Variables:
+     example_text : str — newline-separated "Description / Case Pack" examples
+#}
+You are to extract the Case Pack quantity from a product description. The Case Pack is the number of items in a case, usually a number like 1000, 500, 250, etc.
+
+Here are some examples from the data — but these may not be the only ways case pack may be mentioned in the description:
+{{ example_text }}
+
+Only return the number, no other text. If you cannot find a Case Pack in the description, return 'N/A'.

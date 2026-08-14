@@ -1,0 +1,209 @@
+name: Cups
+data_dir: Cups
+sales_file: "Cups Sales Data L6M Feb-Jul.xlsx"
+
+matching:
+  critical_attributes:
+    - Product Capacity
+    - Beverage Cup Type
+    - Usage Temperature
+    - Color
+    - Beverage Cup Style
+    - Themes
+  directional_attributes:
+    - Material
+    - Product Dimensions
+    - Product Dimension Type
+    - Bottom Diameter (IN)
+    - Top Diameter (IN)
+    - Pattern & Design
+    - Pack Size
+    - Sustainable Products
+    - Compatible Product & Product Type
+    - Foodservice Global Attributes
+  exclusion_rules:
+    - name: Perfect Touch
+      description: >-
+        If the original item's Beverage Cup Style is "Perfect Touch",
+        return an empty Matches list. No exceptions. Perfect Touch items
+        must never appear in any Matches list.
+  vendor_hierarchies:
+    Paper Hot Cup:
+      - Graphic Packaging
+      - Dart
+      - Eco Products
+      - World Centric
+      - Georgia Pacific
+      - Huhtamaki
+    Paper Cold Cup:
+      - Continental Cup
+      - Graphic Packaging
+      - Dart
+    Plastic Cold Cup:
+      - Dart
+      - Fabrikal
+    Plastic Portion Cup:
+      - Dart
+      - Fabrikal
+      - World Centric
+      - Eco Products
+  vb_brand_name: Victoria Bay
+  top_n: 40
+
+taxonomy:
+  # Salsify attribute columns to enrich the cups SKUs with. Mirrors the curated
+  # list used in the legacy 01_Taxonomy.ipynb (cells ~55–60). Leave unset to
+  # auto-discover via coverage_threshold.
+  columns_for_description:
+    - Beverage Cup Type
+    - Product Capacity
+    - Usage Temperature
+    - Material
+    - Product Type Collapse
+    - Pack Size
+    - Color
+    - Foodservice Global Attributes
+    - Beverage Cup Style
+    - Pattern & Design
+  coverage_threshold: 15.0
+  default_pack_size: 1000
+
+  # Read Sancus item clusters so extraction sees every description Imperial Dade
+  # holds for the same physical product, not just this branch's wording.
+  # Measured on the 4,561-item cups universe: 99.9% of items resolve to a
+  # cluster. VB and non-VB siblings are both included (per direction) — the
+  # cluster is the same product regardless of who sells it.
+  use_cluster_descriptions: true
+  max_cluster_descriptions: 8
+  # Required guard, not a tuning nicety: item code 'CC' matched clusters
+  # containing "upsg freight charge" and "labor to repair tool". At 0.30 those
+  # are rejected while genuine siblings (which contribute diameter, case pack
+  # and vendor) survive.
+  cluster_similarity_threshold: 0.30
+  cluster_attribute_hints:
+    - color
+    - material
+    - volume
+    - units
+    - diameter
+    - thickness
+    - dimensions
+    - case_pack
+
+  # Cups-specific normalization rules, ported from the deterministic regex/dict
+  # extractor. These do NOT add columns — they teach the Stage-1 LLM how to map
+  # synonyms/abbreviations onto the existing columns_for_description above.
+  # Each block is keyed by an attribute name from columns_for_description.
+  extraction_rules:
+    Beverage Cup Type:
+      synonyms:
+        Glass: [glass, shot glass]
+        Tumbler: [tumbler, tumb, tumblers]
+        Cup Lid Dome: [lid dome, dome lid, cup dome, cup dome lid]
+        Souffle Cup Lid: [lid souffle, lid souffle cup]
+        Portion Cup Lid: [portion cup lid, cup portion lid, lid portion cup]
+        Cup Lid: [lid cup, cup lid, straw lid, lid straw]
+        Portion Cup: [portion cup, cup portion]
+        Foam Cup: [foam cup, cup foam]
+        Coffee Sleeve: [sleeve coffee]
+        Coffee Carrier: [carrier coffee, coffee move]
+        Carrier Cup: [carrier, tray cup, carrier cup, cup carrier, tray cup carrier]
+        Souffle Cup: [souffle cup, cup souffle]
+        Coffee Cup: [coffee cup]
+        Cup: [cup]
+        Phade Straw: [phade straw, straw phade]
+        Agave Straw: [agave straw, straw agave]
+        Aircarbon Straw: [aircarbon straw, air carbon straw]
+        Straw: [straw, straws]
+        Plate: [plate]
+        Stirrer: [stirrer]
+        Container: [cont, container]
+        Plug: [plug]
+      notes: >-
+        Choose the MOST specific type when several could apply. A more specific
+        multi-word type ("Cup Lid Dome", "Portion Cup Lid", "Coffee Cup") always
+        wins over the generic "Cup"; only fall back to "Cup" when nothing more
+        specific matches.
+    Material:
+      synonyms:
+        Polypropylene (PP): [pp, polypro]
+        Polystyrene (PS): [ps]
+        Plastic: [plastic, plstc]
+        Paper: [paper, ppr]
+        Paperboard: [paperboard, pprbrd]
+        PLA: [pla]
+        CPLA: [cpla]
+        Wooden: [wood]
+        Glass: [glass]
+        Aluminum: [aluminum]
+        PET: [pet]
+        Fiber: [fiber]
+      notes: Match whole-word abbreviations only (e.g. "pp", "ppr", "plstc").
+    Usage Temperature:
+      synonyms:
+        Hot: [hot]
+        Cold: [cold]
+    Product Capacity:
+      pattern: >-
+        A number followed by an ounce unit, e.g. "12oz", "8 oz", "16 ounce".
+        Capture both the number and the oz/ounce unit.
+      notes: >-
+        Diameter is a different measurement: a number followed by "mm" or
+        "series" (e.g. "90mm", "12 series"). Do not record a diameter as the
+        capacity.
+    Color:
+      values:
+        - Red
+        - Blue
+        - Green
+        - Yellow
+        - Black
+        - White
+        - Clear
+        - Natural
+        - Gray
+        - Orange
+        - Brown
+        - Kraft
+        - Translucent
+        - Transparent
+      notes: >-
+        Map abbreviations to the full color: grn=Green, clr=Clear, nat=Natural,
+        trans/transl=Transparent, gy/grey=Gray, yl=Yellow, blk=Black,
+        wh/wht=White, kft=Kraft.
+    Foodservice Global Attributes:
+      synonyms:
+        Compostable: [bio, eco, compostable, compost]
+        Non Compostable: [non compostable]
+      notes: Capture the sustainability designation when present in the description.
+    Beverage Cup Style:
+      synonyms:
+        Double Wall: [dbl, dbl wall, double wall]
+        No Slot: [no slot, no-slot]
+        Slot: [straw slot, w / slot, w/slot, strawslot, slot]
+        No Hole: [no hole, nohole]
+        Hole: [hole, wide hole]
+        Flat: [flat]
+        Sip Through: [sip through, sip, sipper, sip hole]
+        Foam: [foam]
+      notes: >-
+        Several style attributes can co-exist on one item (e.g. a lid that is
+        both "Double Wall" and "Sip Through"). "strawless" means "No Slot" for
+        the straw slot AND "Sip Through" for the drinking style — capture both
+        senses when an item is described as strawless.
+    Pattern & Design:
+      synonyms:
+        Design: [design]
+        Serenity: [serenity]
+        Mistique: [mistique]
+
+feedback:
+  accept_label: "Match"
+  reject_label: "No Match"
+  use_subcategory_rules: false
+
+optimization:
+  max_suppliers: 192
+  extra_vendor_exclusions:
+    - Direct Link
+    - Carryout Bags, Inc.
