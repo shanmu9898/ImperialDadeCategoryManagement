@@ -1,0 +1,110 @@
+name: Liners
+data_dir: Liners
+sales_file: "Liners Sales Data L6M.xlsx"
+
+matching:
+  critical_attributes:
+    - Width
+    - Length
+    - Density
+    - Gauge
+    - Color
+  directional_attributes:
+    - Pack Size
+    - Sustainable Products
+  exclusion_rules:
+    - name: Compostable
+      description: >-
+        Exclude compostable liners from all matches. Green color is a common
+        indication of compostable material, but use any explicit compostable
+        designation in the item attributes or description as authoritative.
+  vendor_hierarchies:
+    Liners:
+      - Heritage Bag-Novolex
+      - Revolution Commercial Solutions
+      - Berry Global
+      - IBS Solutions - Inteplast
+      - Mintx
+      - XL Plastics
+      - Quality Imports and Supplies
+      - Republic Bag-Sigma
+      - Inteplast IBS
+      - Colonial Bag Corporation
+  vb_brand_name: Victoria Bay
+  top_n: 20
+
+taxonomy:
+  columns_for_description:
+    - Width
+    - Length
+    - Density
+    - Gauge
+    - Color
+  coverage_threshold: 15.0
+  default_pack_size: 1000
+  use_cluster_descriptions: false
+  max_cluster_descriptions: 8
+  cluster_similarity_threshold: 0.30
+  cluster_attribute_hints:
+    - color
+    - density
+    - gauge
+    - dimensions
+    - case_pack
+
+  extraction_rules:
+    Width:
+      pattern: >-
+        The first number in a liner dimension pair, normally written as
+        width x length (for example, 33 in 33x40). Capture the numeric width
+        in inches.
+      notes: >-
+        Width is the first dimension in a dimension pair. Do not swap it with
+        Length.
+    Length:
+      pattern: >-
+        The second number in a liner dimension pair, normally written as
+        width x length (for example, 40 in 33x40). Capture the numeric length
+        in inches.
+      notes: >-
+        Length is the second dimension in a dimension pair. Do not swap it
+        with Width.
+    Density:
+      synonyms:
+        Low Density: [ld, ldpe, low density, low-density]
+        High Density: [hd, hdpe, high density, high-density]
+      values:
+        - Low Density
+        - High Density
+      notes: >-
+        LD and LDPE mean Low Density. HD and HDPE mean High Density. Preserve
+        the canonical values Low Density and High Density.
+    Gauge:
+      pattern: >-
+        Capture the liner thickness value and its unit. HD liners commonly use
+        mic/micron units as stated in the description; LD liners commonly use
+        mil units.
+      notes: >-
+        Keep the numeric value with its unit. Do not confuse Gauge with the
+        liner Width or Length.
+    Color:
+      values:
+        - Black
+        - Clear
+        - Natural
+        - White
+        - Red Bio
+        - Blue Soiled Linen
+      notes: >-
+        Map abbreviations and description wording to the closest listed
+        canonical color. Green commonly indicates compostable liners and must
+        be excluded according to the Compostable rule.
+
+feedback:
+  accept_label: "Accept"
+  reject_label: "Reject"
+  use_subcategory_rules: false
+
+optimization:
+  max_suppliers: 180
+  extra_vendor_exclusions: []

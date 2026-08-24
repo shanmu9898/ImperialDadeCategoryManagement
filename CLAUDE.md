@@ -26,6 +26,13 @@ Entry points, in order of how much they are actually used:
 | `build_comparison_output.py` | Post-hoc primary/substitute comparison workbook. |
 | `imperial-dade` CLI | Papermill-executes `notebooks/pipeline_template.ipynb`. |
 
+`liners.yaml` is the first non-Cups category run end-to-end. The category is
+filtered through the same item-segment mapping and uses Width, Length, Density,
+Gauge, and Color as critical matching attributes. Its absolute exclusion is
+compostable product; its preferred-vendor hierarchy is the ordered vendor list
+in the YAML. The Liners run resolved 35,384 item-master rows, pulled sales for
+6,685 S2K item codes, and attributed 4,784 rows.
+
 ---
 
 ## Run Stage 1 and Stage 2 as separate processes
@@ -55,6 +62,12 @@ Bust it by deleting the file, pointing `IMPERIAL_DADE_SMOKE_CACHE` elsewhere, or
 
 A poisoned cache is a real failure mode: an early cluster run wrote all-empty columns and the next run happily reused them.
 If a cached artifact looks wrong, delete it rather than reasoning around it.
+
+The item-segment cache can become stale when a new category is added. If a
+known live category is absent from `item_segment.pkl`, delete that cache and
+refresh it; preserve the large shared `salsify_items.pkl` and
+`item_master_raw.pkl` caches unless their source data is intentionally being
+refreshed. Category sales caches are named `sales_<category>_full.pkl`.
 
 There is **no LLM response cache**.
 The only saving is within-run deduplication of identical descriptions, which recovers almost nothing (12 of 4,568).
@@ -148,6 +161,45 @@ Access rule fields with **brackets** (`rule['values']`), never `rule.values` - d
 
 `format_df_prompts` calls `.format(**row)` on the rendered system prompt, so a literal `{` or `}` reaching the template will raise `KeyError`.
 Keep row-level free text in the user prompt.
+
+## Liners run notes
+
+The Liners YAML is at `src/imperial_dade/categories/liners.yaml`. Its pinned
+taxonomy fields (`Width`, `Length`, `Density`, and `Gauge`) are LLM-extracted
+fields rather than existing Salsify columns in the current source snapshot;
+coverage output reports them as LLM-only columns with zero initial coverage.
+This is expected for the current run, but validate the source schema before
+changing the YAML or interpreting coverage percentages.
+
+The successful Liners run produced:
+
+- `Data/Liners/Output/Liners_Attributed.csv`
+- `Data/Liners/Output/Liners_taxonomy.xlsx`
+- `Data/Liners/Output/Liners_coverage_improvement.csv`
+- `Data/Liners/Output/Liners_matches.csv`
+- `Data/Liners/Output/Liners_Subs_<date>.xlsx`
+
+Stage 2 has no checkpoint or response cache. Embeddings, prompts, and partial
+responses are held in memory, so a crash requires rerunning Stage 2. One Liners
+attempt crashed after API timeouts and malformed text match IDs; a fresh retry
+completed with no API timeouts, but the existing parser skipped 23 text IDs.
+Always inspect the Stage 2 log for `APITimeoutError` and `Cannot convert match ID`
+before treating the workbook as final.
+
+The Cups review workbook is a separate post-hoc artifact. For any category,
+run `build_comparison_output.py` against `<Category>_matches.csv`; for example:
+
+```powershell
+.\.venv312\Scripts\python.exe build_comparison_output.py `
+  --category Liners `
+  --matches Data/Liners/Output/Liners_matches.csv `
+  --vpn-exclusion
+```
+
+This writes `<Category>_Subs_Comparison_<date>.xlsx` with disjoint
+`Primary_vs_VB` and `Primary_no_VB` sheets. Cups retains its legacy attribute
+layout; other categories derive comparison attributes from their YAML and keep
+only source columns present in the matches CSV.
 
 ---
 

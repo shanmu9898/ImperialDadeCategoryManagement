@@ -31,6 +31,7 @@ from datetime import date
 from pathlib import Path
 
 import pandas as pd
+from imperial_dade.categories import load_category
 
 # (output label, source column in the matches file). Order drives column order.
 ATTRS: list[tuple[str, str]] = [
@@ -48,6 +49,29 @@ ATTRS: list[tuple[str, str]] = [
     ("Product Type Collapse", "Product Type Collapse"),
     ("Usage Temperature", "Usage Temperature"),
 ]
+
+_CUPS_ATTRS = ATTRS.copy()
+
+
+def configure_attrs(category: str, available: set[str] | None = None) -> None:
+    """Use the legacy Cups layout, or derive the layout from category YAML."""
+    global ATTRS, SUBS_PAIRS
+    if category.casefold() == "cups":
+        ATTRS = _CUPS_ATTRS.copy()
+    else:
+        cfg = load_category(category)
+        names = ["Description", "VB Flag", "VGN", "VPN", "Case Pack"]
+        names += cfg.matching.critical_attributes
+        names += cfg.matching.directional_attributes
+        seen: set[str] = set()
+        ordered = [name for name in names if not (name in seen or seen.add(name))]
+        source_map = {"Description": "Combined Descriptions"}
+        ATTRS = [
+            (name, source_map.get(name, name))
+            for name in ordered
+            if available is None or source_map.get(name, name) in available
+        ]
+    SUBS_PAIRS = [(label, label) for label, _ in ATTRS]
 
 ITEM_COL = "Entity--Item"
 VB_FLAG_COL = "VB Flag"
@@ -282,6 +306,7 @@ def main() -> int:
     out_dir = Path("Data") / args.category / "Output"
 
     if args.from_subs:
+        configure_attrs(args.category)
         subs_path = Path(args.from_subs)
         if not subs_path.exists():
             raise FileNotFoundError(f"Subs workbook not found: {subs_path}")
@@ -294,6 +319,7 @@ def main() -> int:
         source = Path(args.matches) if args.matches else out_dir / f"{args.category}_matches.csv"
         if not source.exists():
             raise FileNotFoundError(f"Matches file not found: {source}")
+        configure_attrs(args.category, set(pd.read_csv(source, nrows=0).columns))
         out_path = Path(args.out) if args.out else (
             out_dir / f"{args.category}_Subs_Comparison_{date.today():%Y-%m-%d}.xlsx"
         )
